@@ -1,0 +1,43 @@
+# UCP Technical Committee Meeting - 2026-02-04
+
+**Led by:** Amit Handa
+
+## Attendance
+* **Present:** Amit Handa, Ilya Grigorik, Maxime Najim, Daniel Wyckoff, Naga Malepati, Imran Hoosain, Anurag Sinha, Chris Sauve, Ryan Cheung, Guillaume Verdier
+
+## 1. Review of Action Items from previous meeting
+* [x] Publish Minutes Proposal (Guillaume Verdier) - *Status: Done*
+* [ ] Catalog Capability Final Review (Amit Handa) - *Status: In Progress*
+
+## 2. Technical Decisions & Consensus
+* **Topic:** Multi-Item Lookup in Catalog Capability
+    * **Discussion:** Evaluated GET (single-item) vs. POST (multi-item) implementation. Agreed that a single POST method using an array of IDs simplifies context handling (country, currency) and protocol consistency.
+    * **Decision:** Approved via consensus to model lookup solely as a POST request.
+    * **Context:** [PR: Catalog Capability](#)
+
+* **Topic:** Omit Checkout ID Deprecation
+    * **Discussion:** Discussed removing `checkout_id`. Agreed that straight removal is a breaking change and a formal deprecation process is required.
+    * **Decision:** Field will be marked as `deprecated` rather than removed immediately.
+    * **Context:** [PR: Omit Checkout ID](#)
+
+* **Topic:** Governance Automation & New Repository
+    * **Discussion:** Proposal to create a shared repository for cross-repo configs (Code of Conduct, Linters) and implement PR triage via GitHub Code Owners.
+    * **Decision:** Approved creation of new shared repo and migration to automated PR assignment.
+    * **Context:** [Governance Doc](#)
+
+## 3. Open Discussions & TC PR Reviews
+* **Topic:** Tender-Based Discounts (Target RedCard Use Case)
+    * **Notes:** Discussed the need to display 5% discounts and free shipping upstream before order placement. Concerns raised by Target and Google regarding credential validation "chicken and egg" problems (platforms often don't share card bins until submission).
+
+* **Topic:** Risk and Abuse Signals
+    * **Notes:** Ilya Grigorik proposed a "signals" open bag and a new non-user-facing `hint` message type to provide metadata (IP, Device ID) to reduce transaction friction. Amit Handa noted privacy concerns requiring Risk Team review.
+
+* **Topic:** Request/Response Signatures
+    * **Notes:** Identified inconsistencies between MCP and REST transports. Currently blocking Target/Gemini integration. A tactical unblocking step (making fields optional temporarily) was discussed.
+
+## 4. New Action Items
+* [ ] **Amit Handa:** Schedule deeper-dive breakout sessions for Tender-Based Discounts and Risk/Abuse signals with relevant Risk/Payments teams. (Due: 2026-02-11)
+* [ ] **Guillaume Verdier:** Populate the specific list of maintainers in the governance document for TC sanity check. (Due: 2026-02-06)
+* [ ] **Ilya Grigorik:** Update Catalog PR to model lookups as POST and spec out a major refactor proposal for request/response signatures. (Due: 2026-02-11)
+* [ ] **Daniel Wyckoff:** Push local updates for UCP schema binary to support `@deprecated` annotations. (Due: 2026-02-07)
+* [ ] **Ryan Cheung:** Coordinate with Daniel Wyckoff on the versioning process for the `Omit checkout ID` PR. (Due: 2026-02-07)
