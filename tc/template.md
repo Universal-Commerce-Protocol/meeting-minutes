@@ -1,4 +1,4 @@
-# UCP Technical Committee Meeting - {YYYY-MM-DD}
+# UCP Tech Council (TC) Meeting - {YYYY-MM-DD}
 
 **Led by:** {NAME}
 
