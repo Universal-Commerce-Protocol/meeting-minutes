@@ -1,0 +1,6 @@
+# Universal Commerce Protocol (UCP) Codeowners
+# Default for all files (meeting notes).
+*  @Universal-Commerce-Protocol/tech-council
+
+# Infrastructure
+/.github/     @Universal-Commerce-Protocol/devops-maintainers
