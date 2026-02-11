@@ -2,5 +2,9 @@
 # Default for all files (meeting notes).
 *  @Universal-Commerce-Protocol/tech-council
 
-# Infrastructure
-/.github/     @Universal-Commerce-Protocol/devops-maintainers
+# Infrastructure & Tooling
+/.github/                 @Universal-Commerce-Protocol/devops-maintainers
+
+# Governance
+/CODE_OF_CONDUCT.md       @Universal-Commerce-Protocol/governance-council
+/SECURITY.md              @Universal-Commerce-Protocol/governance-council
