@@ -10,7 +10,5 @@
 /tc/                      @Universal-Commerce-Protocol/tech-council
 
 # Governance
-/CODE_OF_CONDUCT.md       @Universal-Commerce-Protocol/governance-council
-/SECURITY.md              @Universal-Commerce-Protocol/governance-council
 
 /.github/CODEOWNERS      @Universal-Commerce-Protocol/governance-council
