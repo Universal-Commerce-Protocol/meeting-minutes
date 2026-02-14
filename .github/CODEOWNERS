@@ -1,0 +1,13 @@
+# Universal Commerce Protocol (UCP) Codeowners
+
+# Default for all files.
+*  @Universal-Commerce-Protocol/devops-maintainers
+
+# Infrastructure & Tooling
+/.github/                 @Universal-Commerce-Protocol/devops-maintainers
+
+# Meeting Minutes - Technical Council
+/tc/                      @Universal-Commerce-Protocol/tech-council
+
+# Governance
+/.github/CODEOWNERS      @Universal-Commerce-Protocol/governance-council
