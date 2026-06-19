@@ -9,5 +9,8 @@
 # Meeting Minutes - Technical Council
 /tc/                      @Universal-Commerce-Protocol/tech-council
 
+# Meeting Minutes - Governing Council
+/gc/                      @Universal-Commerce-Protocol/governance-council
+
 # Governance
 /.github/CODEOWNERS      @Universal-Commerce-Protocol/governance-council
