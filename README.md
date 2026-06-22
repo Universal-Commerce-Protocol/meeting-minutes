@@ -1,10 +1,10 @@
 # Universal Commerce Protocol - Meeting Minutes
 
-This repository serves as the official, transparent, and version-controlled record of the Universal Commerce Protocol (UCP) Tech Council (TC) decisions and discussions.
+This repository serves as the official, transparent, and version-controlled record of the Universal Commerce Protocol (UCP) Tech Council (TC) and Governing Council (GC) decisions and discussions.
 
 ## Objective
 
-To maintain a clear public record of governance operations and technical decisions, modeling industry standards for open source transparency.
+To maintain a clear public record of governance operations and decisions, modeling industry standards for open source transparency.
 
 ## Repository Structure
 
@@ -14,3 +14,7 @@ The minutes are organized chronologically to ensure scalability:
   - **`template.md`**: The standard markdown template for creating new meeting notes.
   - **`YYYY/`**: Folders organized by year (e.g., `2026/`).
     - **`YYYY-MM-DD.md`**: Individual meeting files (e.g., `2026-02-14.md`).
+- **`gc/`**: Dedicated directory for Governing Council minutes.
+  - **`template.md`**: The standard markdown template for creating new meeting notes.
+  - **`YYYY/`**: Folders organized by year (e.g., `2026/`).
+    - **`GC-YYYY-MM-DD.md`**: Individual meeting files (e.g., `GC-2026-06-17.md`).
