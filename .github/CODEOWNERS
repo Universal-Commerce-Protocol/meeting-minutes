@@ -10,11 +10,13 @@
 # DWG minutes are nested under their sponsoring council (tc/<domain>/dwg/<name>/)
 # so that DTC oversight of DWG artifacts applies by default.
 #
-# TODO: split ownership per council once shopping-tech-council and
-# food-tech-council teams exist and the org governance rules
-# (.github/org-tools/governance/rules/meeting-minutes-rules.yml) list every
-# domain council in its team_hierarchy.
-/tc/                      @Universal-Commerce-Protocol/tech-council
+# @devops-maintainers is listed alongside each council as a backup approver, so
+# minutes are never blocked when a council is unavailable or not yet staffed.
+# This keeps the approval path /tc/ already has today via the default owner.
+/tc/food/      @Universal-Commerce-Protocol/food-tech-council @Universal-Commerce-Protocol/devops-maintainers
+/tc/lodging/   @Universal-Commerce-Protocol/lodging-tech-council @Universal-Commerce-Protocol/devops-maintainers
+/tc/payments/  @Universal-Commerce-Protocol/payments-tech-council @Universal-Commerce-Protocol/devops-maintainers
+/tc/shopping/  @Universal-Commerce-Protocol/shopping-tech-council @Universal-Commerce-Protocol/devops-maintainers
 
 # Meeting Minutes - Governing Council
 /gc/                      @Universal-Commerce-Protocol/governance-council
