@@ -1,0 +1,56 @@
+#   Copyright 2026 Google LLC
+#
+#   Licensed under the Apache License, Version 2.0 (the "License");
+#   you may not use this file except in compliance with the License.
+#   You may obtain a copy of the License at
+#
+#       http://www.apache.org/licenses/LICENSE-2.0
+#
+#   Unless required by applicable law or agreed to in writing, software
+#   distributed under the License is distributed on an "AS IS" BASIS,
+#   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#   See the License for the specific language governing permissions and
+#   limitations under the License.
+
+---
+name: PR Governance
+
+# pull_request_target is required so the validator can read team memberships via
+# ORG_READ_TOKEN on PRs from forks, and workflow_run lets it re-evaluate when a
+# review is submitted. No PR-authored code is checked out or executed: the
+# reusable workflow only reads PR metadata via the API.
+on: # zizmor: ignore[dangerous-triggers]
+  pull_request_target:
+    types: [
+      opened,
+      synchronize,
+      reopened,
+      ready_for_review,
+      review_requested,
+      review_request_removed,
+      assigned,
+      unassigned
+    ]
+  workflow_run:
+    workflows: ["PR Review Listener"]
+    types: [completed]
+
+jobs:
+  governance:
+    name: Reviews
+    permissions:
+      statuses: write
+      contents: read
+      pull-requests: read
+    # Reusable workflow from the central governance repository, hash-pinned per
+    # the org's unpinned-uses policy. This pins only the orchestration: the
+    # workflow checks out Universal-Commerce-Protocol/.github with no explicit
+    # ref, so the rules file and validator scripts are always read from its
+    # default branch. Governance rule changes apply without bumping this pin.
+    uses: Universal-Commerce-Protocol/.github/.github/workflows/reusable-governance.yml@d07b2cb5161bd5d625e69f42e06dfff2f0ecdbc5 # main
+    with:
+      pr-number: ${{ github.event.pull_request.number }}
+      commit-sha: ${{ github.event.pull_request.head.sha || github.event.workflow_run.head_sha }}
+    secrets:
+      # Required: An org-level Read token to read team memberships
+      ORG_READ_TOKEN: ${{ secrets.ORG_READ_TOKEN }}
