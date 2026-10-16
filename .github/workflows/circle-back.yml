@@ -70,40 +70,4 @@ jobs:
           ORG_OWNER: ${{ github.repository_owner }}
           ORG_TRIAGE_TOKEN: ${{ secrets.ORG_TRIAGE_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TARGET_FILES=()
-          EXTRA_ARGS=()
-
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            TARGET_FILES+=("$INPUT_MINUTES_FILE")
-            if [ "$INPUT_APPLY" = "true" ]; then
-              EXTRA_ARGS+=("--apply")
-            fi
-          elif [ "$EVENT_NAME" = "pull_request" ]; then
-            mapfile -t TARGET_FILES < <(git diff --name-only --diff-filter=AM "$BASE_SHA" HEAD -- 'tc/**/*.md' 'gc/**/*.md' || true)
-            if [ -n "$PR_NUMBER" ]; then
-              EXTRA_ARGS+=("--preview-pr" "$PR_NUMBER")
-            fi
-          elif [ "$EVENT_NAME" = "push" ]; then
-            if [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ] || [ -z "$BEFORE_SHA" ]; then
-              mapfile -t TARGET_FILES < <(git diff-tree --no-commit-id --name-only -r --diff-filter=AM HEAD -- 'tc/**/*.md' 'gc/**/*.md' || true)
-            else
-              mapfile -t TARGET_FILES < <(git diff --name-only --diff-filter=AM "$BEFORE_SHA" HEAD -- 'tc/**/*.md' 'gc/**/*.md' || true)
-            fi
-            EXTRA_ARGS+=("--apply")
-          fi
-
-          if [ ${#TARGET_FILES[@]} -eq 0 ] || [ -z "${TARGET_FILES[0]}" ]; then
-            echo "No added or modified meeting minutes files detected."
-            exit 0
-          fi
-
-          python3 .github/scripts/circle_back.py \
-            --org "$ORG_OWNER" \
-            --summary-file summary.md \
-            "${EXTRA_ARGS[@]}" \
-            "${TARGET_FILES[@]}"
-
-          if [ -f summary.md ]; then
-            cat summary.md >> "$GITHUB_STEP_SUMMARY"
-          fi
+        run: python3 .github/scripts/circle_back.py

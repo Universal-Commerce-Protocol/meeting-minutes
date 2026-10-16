@@ -29,6 +29,7 @@ import logging
 import os
 from pathlib import Path
 import re
+import subprocess
 import sys
 import urllib.error
 import urllib.parse
@@ -581,6 +582,79 @@ def render_markdown_summary(
     return "\n".join(lines)
 
 
+ZERO_SHA = "0000000000000000000000000000000000000000"
+
+
+def git_changed_minutes_files(
+    base_sha: str | None,
+    repo_root: Path,
+) -> list[str]:
+    """Returns added or modified Markdown files under tc/ and gc/ since base_sha."""
+    if not base_sha or base_sha == ZERO_SHA:
+        cmd = [
+            "git",
+            "diff-tree",
+            "--no-commit-id",
+            "--name-only",
+            "-r",
+            "--diff-filter=AM",
+            "HEAD",
+            "--",
+            "tc/**/*.md",
+            "gc/**/*.md",
+        ]
+    else:
+        cmd = [
+            "git",
+            "diff",
+            "--name-only",
+            "--diff-filter=AM",
+            base_sha,
+            "HEAD",
+            "--",
+            "tc/**/*.md",
+            "gc/**/*.md",
+        ]
+
+    proc = subprocess.run(
+        cmd,
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        logger.warning("git diff returned %d: %s", proc.returncode, proc.stderr.strip())
+        return []
+
+    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+
+def resolve_github_event_config(
+    env: dict[str, str],
+    repo_root: Path,
+) -> tuple[list[str], bool, int | None]:
+    """Resolves target files, apply flag, and preview PR number from GitHub Actions env vars."""
+    event_name = env.get("EVENT_NAME") or env.get("GITHUB_EVENT_NAME") or ""
+    if event_name == "workflow_dispatch":
+        input_file = (env.get("INPUT_MINUTES_FILE") or "").strip()
+        files = [input_file] if input_file else []
+        apply = (env.get("INPUT_APPLY") or "").strip().lower() == "true"
+        return files, apply, None
+
+    if event_name == "pull_request":
+        files = git_changed_minutes_files(env.get("BASE_SHA"), repo_root)
+        pr_str = (env.get("PR_NUMBER") or "").strip()
+        preview_pr = int(pr_str) if pr_str.isdigit() else None
+        return files, False, preview_pr
+
+    if event_name == "push":
+        files = git_changed_minutes_files(env.get("BEFORE_SHA"), repo_root)
+        return files, True, None
+
+    return [], False, None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Post or preview circle-back comments from UCP meeting minutes."
@@ -588,7 +662,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "files",
         nargs="*",
-        help="Meeting minutes Markdown file paths (relative to repo root).",
+        help="Meeting minutes Markdown file paths (relative to repo root). If omitted in CI, resolved from GitHub event.",
     )
     parser.add_argument(
         "--repo-root",
@@ -597,7 +671,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--org",
-        default=DEFAULT_ORG,
+        default=os.getenv("ORG_OWNER") or DEFAULT_ORG,
         help=f"GitHub organization (default: {DEFAULT_ORG}).",
     )
     parser.add_argument(
@@ -622,7 +696,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--summary-file",
-        help="Optional file path to write the Markdown summary report.",
+        default=os.getenv("GITHUB_STEP_SUMMARY"),
+        help="Optional file path to write the Markdown summary report (defaults to GITHUB_STEP_SUMMARY if set).",
     )
     parser.add_argument(
         "--preview-pr",
@@ -632,13 +707,30 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     repo_root = Path(args.repo_root).resolve()
+
+    target_files = list(args.files)
+    apply = args.apply
+    preview_pr = args.preview_pr
+
+    if not target_files and (os.getenv("EVENT_NAME") or os.getenv("GITHUB_EVENT_NAME")):
+        target_files, env_apply, env_preview_pr = resolve_github_event_config(
+            dict(os.environ), repo_root
+        )
+        apply = apply or env_apply
+        if preview_pr is None:
+            preview_pr = env_preview_pr
+
+    if not target_files:
+        logger.info("No added or modified meeting minutes files detected.")
+        return 0
+
     api_url = os.getenv("GITHUB_API_URL", "https://api.github.com")
     client = GitHubApiClient(token=args.token, api_url=api_url)
 
     all_results: list[tuple[ParsedMinutes, list[TargetResult]]] = []
     has_errors = False
 
-    for file_arg in args.files:
+    for file_arg in target_files:
         file_path = Path(file_arg)
         if not file_path.is_absolute():
             file_path = (repo_root / file_path).resolve()
@@ -665,7 +757,7 @@ def main(argv: list[str] | None = None) -> int:
         results = process_minutes(
             parsed,
             client=client,
-            apply=args.apply,
+            apply=apply,
             org=args.org,
             minutes_repo=args.minutes_repo,
             branch=args.branch,
@@ -676,40 +768,41 @@ def main(argv: list[str] | None = None) -> int:
 
     summary_md = render_markdown_summary(
         all_results,
-        apply=args.apply,
+        apply=apply,
         org=args.org,
         minutes_repo=args.minutes_repo,
         branch=args.branch,
     )
 
     if args.summary_file:
-        Path(args.summary_file).write_text(summary_md, encoding="utf-8")
+        with Path(args.summary_file).open("a", encoding="utf-8") as f:
+            f.write(summary_md + "\n")
 
-    if args.preview_pr and all_results:
+    if preview_pr and all_results:
         try:
             client.upsert_pr_preview_comment(
                 org=args.org,
                 repo=args.minutes_repo,
-                pr_number=args.preview_pr,
+                pr_number=preview_pr,
                 body=summary_md,
             )
             logger.info(
                 "Updated preview comment on %s/%s#%d.",
                 args.org,
                 args.minutes_repo,
-                args.preview_pr,
+                preview_pr,
             )
         except urllib.error.HTTPError as exc:
             if exc.code in (401, 403):
                 logger.warning(
                     "Note: Could not post preview comment on PR #%d (HTTP %d); job summary still generated.",
-                    args.preview_pr,
+                    preview_pr,
                     exc.code,
                 )
             else:
                 logger.error(
                     "Failed to post preview comment on PR #%d: %s",
-                    args.preview_pr,
+                    preview_pr,
                     exc,
                 )
 

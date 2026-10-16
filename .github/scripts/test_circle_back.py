@@ -277,6 +277,46 @@ class CircleBackTest(unittest.TestCase):
             text = summary_file.read_text(encoding="utf-8")
             self.assertIn("ucp#897", text)
 
+    def test_resolve_github_event_config(self) -> None:
+        root = pathlib.Path(".")
+        with mock.patch.object(
+            circle_back,
+            "git_changed_minutes_files",
+            return_value=["tc/shopping/2026/2026-10-09.md"],
+        ) as mock_diff:
+            files, apply, preview_pr = circle_back.resolve_github_event_config(
+                {
+                    "EVENT_NAME": "pull_request",
+                    "BASE_SHA": "abc123",
+                    "PR_NUMBER": "49",
+                },
+                root,
+            )
+            self.assertEqual(files, ["tc/shopping/2026/2026-10-09.md"])
+            self.assertFalse(apply)
+            self.assertEqual(preview_pr, 49)
+            mock_diff.assert_called_once_with("abc123", root)
+
+            files, apply, preview_pr = circle_back.resolve_github_event_config(
+                {"EVENT_NAME": "push", "BEFORE_SHA": "def456"},
+                root,
+            )
+            self.assertEqual(files, ["tc/shopping/2026/2026-10-09.md"])
+            self.assertTrue(apply)
+            self.assertIsNone(preview_pr)
+
+        files, apply, preview_pr = circle_back.resolve_github_event_config(
+            {
+                "EVENT_NAME": "workflow_dispatch",
+                "INPUT_MINUTES_FILE": "tc/shopping/2026/2026-10-09.md",
+                "INPUT_APPLY": "true",
+            },
+            root,
+        )
+        self.assertEqual(files, ["tc/shopping/2026/2026-10-09.md"])
+        self.assertTrue(apply)
+        self.assertIsNone(preview_pr)
+
 
 if __name__ == "__main__":
     unittest.main()
