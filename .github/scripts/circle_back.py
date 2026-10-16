@@ -23,17 +23,17 @@ idempotent link-back comments on open PRs/Issues.
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass, field
 import json
 import logging
 import os
-from pathlib import Path
 import re
 import subprocess
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass, field
+from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger("circle_back")
@@ -44,12 +44,19 @@ DEFAULT_BRANCH = "main"
 
 MINUTES_FILENAME_RE = re.compile(r"^(?:GC-)?\d{4}-\d{2}-\d{2}\.md$")
 H1_RE = re.compile(r"^#\s+(.+?)\s*$")
-H2_RE = re.compile(r"^##\s+(.+?)\s*$")
-TOPIC_RE = re.compile(r"^\s*[-*]\s+\*\*Topic:\*\*\s*(.+?)\s*$")
+SECTION_HEADING_RE = re.compile(r"^#{2,6}\s+(.+?)\s*$")
+TOPIC_RE = re.compile(
+    r"^(\s*)[-*+]\s+(?:\*\*Topic:\*\*|\*\*Topic\*\*:|Topic:)\s*(.+?)\s*$"
+)
+LIST_ITEM_RE = re.compile(r"^(\s*)(?:[-*+]|\d+\.)\s+")
 FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
 GH_LINK_RE = re.compile(
     r"https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/(pull|issues)/(\d+)(?![0-9])"
 )
+SHA_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
+TRAILING_AUTOLINK_PAREN_RE = re.compile(r"\s*\(<?https?://[^\s>)]+>?\)\s*$")
+INLINE_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\(https?://[^)]+\)")
+AUTOLINK_RE = re.compile(r"<https?://[^>]+>")
 
 PREVIEW_COMMENT_MARKER = "<!-- ucp-meeting-minutes-preview -->"
 
@@ -105,7 +112,9 @@ class TargetResult:
 
     target: CircleBackTarget
     state: str  # "open", "closed", "merged", "unknown"
-    action: str  # "posted", "would_post", "skipped_closed", "skipped_merged", "skipped_existing", "error"
+    # "posted", "would_post", "skipped_closed", "skipped_merged",
+    # "skipped_existing", "error"
+    action: str
     comment_body: str
     detail: str = ""
 
@@ -114,8 +123,7 @@ def github_heading_slug(heading_text: str) -> str:
     """Computes a GitHub-compatible Markdown heading anchor slug."""
     slug = heading_text.strip().lower()
     slug = re.sub(r"[^\w\s-]", "", slug)
-    slug = slug.replace(" ", "-")
-    return slug
+    return slug.replace(" ", "-")
 
 
 def is_meeting_minutes_file(rel_path: str) -> bool:
@@ -128,11 +136,16 @@ def is_meeting_minutes_file(rel_path: str) -> bool:
 
 
 def _clean_topic_title(raw_title: str) -> str:
-    """Strips redundant outer bold markers from a topic title."""
+    """Strips redundant outer bold markers and inline URLs from a topic title."""
     cleaned = raw_title.strip()
     if cleaned.startswith("**") and cleaned.endswith("**") and len(cleaned) > 4:
         cleaned = cleaned[2:-2].strip()
-    return cleaned
+    cleaned = INLINE_MD_LINK_RE.sub(r"\1", cleaned)
+    cleaned = TRAILING_AUTOLINK_PAREN_RE.sub("", cleaned)
+    cleaned = AUTOLINK_RE.sub("", cleaned).strip()
+    if cleaned.startswith("**") and cleaned.endswith("**") and len(cleaned) > 4:
+        cleaned = cleaned[2:-2].strip()
+    return cleaned or raw_title.strip(" *<>")
 
 
 def parse_minutes_markdown(
@@ -143,9 +156,11 @@ def parse_minutes_markdown(
 ) -> ParsedMinutes:
     """Parses a meeting minutes Markdown string and extracts PR/Issue targets."""
     norm_path = rel_path.strip().lstrip("./")
-    meeting_title = Path(norm_path).stem
+    default_title = Path(norm_path).stem
+    meeting_title = default_title
     current_section_slug = ""
     current_topic: str | None = None
+    current_topic_indent: int | None = None
     in_fence = False
 
     targets_by_key: dict[tuple[str, str, int], CircleBackTarget] = {}
@@ -158,19 +173,38 @@ def parse_minutes_markdown(
             continue
 
         h1_match = H1_RE.match(line)
-        if h1_match and meeting_title == Path(norm_path).stem:
+        if h1_match and meeting_title == default_title:
             meeting_title = h1_match.group(1).strip()
             continue
 
-        h2_match = H2_RE.match(line)
-        if h2_match:
-            current_section_slug = github_heading_slug(h2_match.group(1))
+        section_match = SECTION_HEADING_RE.match(line)
+        if section_match:
+            heading_text = section_match.group(1).strip()
+            if (
+                meeting_title == default_title
+                and not current_section_slug
+                and heading_text.lower().startswith("ucp ")
+            ):
+                meeting_title = heading_text
+            else:
+                current_section_slug = github_heading_slug(heading_text)
             current_topic = None
+            current_topic_indent = None
             continue
 
         topic_match = TOPIC_RE.match(line)
         if topic_match:
-            current_topic = _clean_topic_title(topic_match.group(1))
+            current_topic_indent = len(topic_match.group(1))
+            current_topic = _clean_topic_title(topic_match.group(2))
+        else:
+            list_match = LIST_ITEM_RE.match(line)
+            if (
+                list_match
+                and current_topic_indent is not None
+                and len(list_match.group(1)) <= current_topic_indent
+            ):
+                current_topic = None
+                current_topic_indent = None
 
         if not current_topic:
             continue
@@ -182,7 +216,7 @@ def parse_minutes_markdown(
             if repo.lower() == minutes_repo.lower():
                 continue
             number = int(num_str)
-            key = (org, repo, number)
+            key = (org.lower(), repo.lower(), number)
             if key not in targets_by_key:
                 targets_by_key[key] = CircleBackTarget(
                     org=org,
@@ -190,6 +224,8 @@ def parse_minutes_markdown(
                     kind=kind,
                     number=number,
                 )
+            elif kind == "pull" and targets_by_key[key].kind == "issues":
+                targets_by_key[key].kind = "pull"
             targets_by_key[key].add_topic(current_topic, current_section_slug)
 
     return ParsedMinutes(
@@ -234,7 +270,10 @@ def format_comment(
     lines.extend(
         [
             "",
-            f"_See the full [meeting minutes]({minutes_url}) for discussion notes and action items._",
+            (
+                f"_See the full [meeting minutes]({minutes_url}) "
+                "for discussion notes and action items._"
+            ),
         ]
     )
     return "\n".join(lines)
@@ -257,6 +296,8 @@ class GitHubApiClient:
         payload: dict | None = None,
     ) -> object:
         url = f"{self.api_url}/{path.lstrip('/')}"
+        if not url.startswith(("https://", "http://")):
+            raise ValueError(f"Unsupported URL scheme: {url}")
         headers = {
             "Accept": "application/vnd.github+json",
             "User-Agent": "ucp-meeting-minutes-circle-back",
@@ -270,14 +311,21 @@ class GitHubApiClient:
             data = json.dumps(payload).encode("utf-8")
             headers["Content-Type"] = "application/json"
 
-        req = urllib.request.Request(url, data=data, headers=headers, method=method)
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        req = urllib.request.Request(  # noqa: S310
+            url, data=data, headers=headers, method=method
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310
             body = resp.read().decode("utf-8")
             return json.loads(body) if body else {}
 
     def get_target_state(self, target: CircleBackTarget) -> str:
         """Returns 'open', 'merged', or 'closed' for a PR or Issue."""
-        cache_key = (target.org, target.repo, target.kind, target.number)
+        cache_key = (
+            target.org.lower(),
+            target.repo.lower(),
+            target.kind,
+            target.number,
+        )
         if cache_key in self._state_cache:
             return self._state_cache[cache_key]
 
@@ -289,6 +337,12 @@ class GitHubApiClient:
             state = "unknown"
         elif target.kind == "pull" and data.get("merged"):
             state = "merged"
+        elif isinstance(data.get("pull_request"), dict):
+            target.kind = "pull"
+            if data["pull_request"].get("merged_at"):
+                state = "merged"
+            else:
+                state = str(data.get("state", "unknown"))
         else:
             state = str(data.get("state", "unknown"))
 
@@ -296,7 +350,7 @@ class GitHubApiClient:
         return state
 
     def has_comment_with_marker(self, target: CircleBackTarget, marker: str) -> bool:
-        """Checks whether the target PR/Issue already has a comment containing marker."""
+        """Checks whether the target PR/Issue already has a marker comment."""
         page = 1
         while True:
             data = self._request(
@@ -376,17 +430,17 @@ def process_minutes(
     )
 
     for target in parsed.targets:
-        body = format_comment(
-            parsed,
-            target,
-            org=org,
-            minutes_repo=minutes_repo,
-            branch=branch,
-        )
         try:
             state = client.get_target_state(target)
         except Exception as exc:
             logger.error("  Error fetching %s: %s", target.short_ref, exc)
+            body = format_comment(
+                parsed,
+                target,
+                org=org,
+                minutes_repo=minutes_repo,
+                branch=branch,
+            )
             results.append(
                 TargetResult(
                     target=target,
@@ -397,6 +451,14 @@ def process_minutes(
                 )
             )
             continue
+
+        body = format_comment(
+            parsed,
+            target,
+            org=org,
+            minutes_repo=minutes_repo,
+            branch=branch,
+        )
 
         if state == "merged":
             logger.info("  Skipping %s: PR is already merged.", target.short_ref)
@@ -411,7 +473,12 @@ def process_minutes(
             continue
 
         if state != "open":
-            logger.info("  Skipping %s: %s is %s.", target.short_ref, target.item_noun, state)
+            logger.info(
+                "  Skipping %s: %s is %s.",
+                target.short_ref,
+                target.item_noun,
+                state,
+            )
             results.append(
                 TargetResult(
                     target=target,
@@ -490,6 +557,11 @@ def process_minutes(
     return results
 
 
+def _escape_table_cell(text: str) -> str:
+    """Escapes pipes and newlines for safe Markdown table cell embedding."""
+    return text.replace("\r", " ").replace("\n", " ").replace("|", r"\|")
+
+
 def render_markdown_summary(
     all_results: list[tuple[ParsedMinutes, list[TargetResult]]],
     apply: bool,
@@ -497,7 +569,7 @@ def render_markdown_summary(
     minutes_repo: str = DEFAULT_MINUTES_REPO,
     branch: str = DEFAULT_BRANCH,
 ) -> str:
-    """Renders a Markdown summary table (and comment previews) for PR comments or Job Summaries."""
+    """Renders a Markdown summary table for PR comments or Job Summaries."""
     mode_title = (
         "🔔 Meeting Minutes Circle-Back Report"
         if apply
@@ -543,25 +615,29 @@ def render_markdown_summary(
         )
         for res in results:
             t = res.target
-            topics_str = "<br>".join(f"• *{topic.title}*" for topic in t.topics)
+            topics_str = "<br>".join(
+                f"• *{_escape_table_cell(topic.title)}*" for topic in t.topics
+            )
             state_str = state_badges.get(res.state, res.state)
             action_str = action_labels.get(res.action, res.action)
             if res.detail:
-                action_str = f"{action_str} (`{res.detail}`)"
+                action_str = f"{action_str} (`{_escape_table_cell(res.detail)}`)"
             lines.append(
-                f"| [`{t.short_ref}`]({t.html_url}) | {state_str} | {topics_str} | {action_str} |"
+                f"| [`{t.short_ref}`]({t.html_url}) | {state_str} "
+                f"| {topics_str} | {action_str} |"
             )
 
         lines.append("")
 
-        preview_targets = [
-            r for r in results if r.action in ("would_post", "posted")
-        ]
+        preview_targets = [r for r in results if r.action in ("would_post", "posted")]
         if preview_targets:
             lines.extend(
                 [
                     "<details>",
-                    f"<summary>Preview circle-back comments ({len(preview_targets)})</summary>",
+                    (
+                        "<summary>Preview circle-back comments "
+                        f"({len(preview_targets)})</summary>"
+                    ),
                     "",
                 ]
             )
@@ -590,14 +666,14 @@ def git_changed_minutes_files(
     repo_root: Path,
 ) -> list[str]:
     """Returns added or modified Markdown files under tc/ and gc/ since base_sha."""
-    if not base_sha or base_sha == ZERO_SHA:
+    if not base_sha or base_sha == ZERO_SHA or not SHA_RE.match(base_sha):
         cmd = [
             "git",
             "diff-tree",
             "--no-commit-id",
             "--name-only",
             "-r",
-            "--diff-filter=AM",
+            "--diff-filter=ACMR",
             "HEAD",
             "--",
             "tc/**/*.md",
@@ -608,7 +684,7 @@ def git_changed_minutes_files(
             "git",
             "diff",
             "--name-only",
-            "--diff-filter=AM",
+            "--diff-filter=ACMR",
             base_sha,
             "HEAD",
             "--",
@@ -634,7 +710,7 @@ def resolve_github_event_config(
     env: dict[str, str],
     repo_root: Path,
 ) -> tuple[list[str], bool, int | None]:
-    """Resolves target files, apply flag, and preview PR number from GitHub Actions env vars."""
+    """Resolves target files, apply flag, and preview PR from CI env vars."""
     event_name = env.get("EVENT_NAME") or env.get("GITHUB_EVENT_NAME") or ""
     if event_name == "workflow_dispatch":
         input_file = (env.get("INPUT_MINUTES_FILE") or "").strip()
@@ -662,12 +738,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "files",
         nargs="*",
-        help="Meeting minutes Markdown file paths (relative to repo root). If omitted in CI, resolved from GitHub event.",
+        help=(
+            "Meeting minutes Markdown file paths (relative to repo root). "
+            "If omitted in CI, resolved from GitHub event."
+        ),
     )
     parser.add_argument(
         "--repo-root",
         default=".",
-        help="Path to the meeting-minutes repository root (default: current directory).",
+        help=(
+            "Path to the meeting-minutes repository root (default: current directory)."
+        ),
     )
     parser.add_argument(
         "--org",
@@ -697,12 +778,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--summary-file",
         default=os.getenv("GITHUB_STEP_SUMMARY"),
-        help="Optional file path to write the Markdown summary report (defaults to GITHUB_STEP_SUMMARY if set).",
+        help=(
+            "Optional file path to write the Markdown summary report "
+            "(defaults to GITHUB_STEP_SUMMARY if set)."
+        ),
     )
     parser.add_argument(
         "--preview-pr",
         type=int,
-        help="Optional PR number in the meeting-minutes repo on which to post/update the preview comment.",
+        help=(
+            "Optional PR number in the meeting-minutes repo on which "
+            "to post/update the preview comment."
+        ),
     )
 
     args = parser.parse_args(argv)
@@ -795,7 +882,8 @@ def main(argv: list[str] | None = None) -> int:
         except urllib.error.HTTPError as exc:
             if exc.code in (401, 403):
                 logger.warning(
-                    "Note: Could not post preview comment on PR #%d (HTTP %d); job summary still generated.",
+                    "Note: Could not post preview comment on PR #%d (HTTP %d); "
+                    "job summary still generated.",
                     preview_pr,
                     exc.code,
                 )
@@ -805,6 +893,14 @@ def main(argv: list[str] | None = None) -> int:
                     preview_pr,
                     exc,
                 )
+                has_errors = True
+        except urllib.error.URLError as exc:
+            logger.error(
+                "Failed to post preview comment on PR #%d: %s",
+                preview_pr,
+                exc,
+            )
+            has_errors = True
 
     return 1 if has_errors else 0
 

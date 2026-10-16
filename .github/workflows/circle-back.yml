@@ -21,6 +21,8 @@ on:
     paths:
       - "tc/**/*.md"
       - "gc/**/*.md"
+      - ".github/scripts/**"
+      - ".github/workflows/circle-back.yml"
   push:
     branches: [main]
     paths:
