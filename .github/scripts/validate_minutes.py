@@ -29,14 +29,14 @@ Enforces a two-tier validation model on added or modified meeting minutes under
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass, field
 import datetime
 import logging
 import os
+from pathlib import Path
 import re
 import subprocess
 import sys
-from dataclasses import dataclass
-from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger("validate_minutes")
@@ -55,7 +55,8 @@ GC_FILENAME_RE = re.compile(r"^GC-(\d{4}-\d{2}-\d{2})\.md$")
 WG_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 DATE_IN_TEXT_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
 
-FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
+OPEN_FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
+INLINE_CODE_RE = re.compile(r"`+[^`]+`+")
 H1_RE = re.compile(r"^#\s+(.+?)\s*$")
 H2_RE = re.compile(r"^##\s+(.+?)\s*$")
 LED_BY_RE = re.compile(r"^\s*(?:[-*+]\s+)?\*\*Led by:\*\*\s*(.+?)\s*$")
@@ -65,7 +66,6 @@ EMPTY_TOPIC_RE = re.compile(r"^\s*[-*+]\s+\*\*Topic:\*\*\s*$")
 MALFORMED_TOPIC_RE = re.compile(
     r"^\s*(?:[-*+]\s+(?:\*\*Topic\*\*:|Topic:)\s*(.*)|\*\*Topic:\*\*\s*(.*))$"
 )
-LIST_ITEM_RE = re.compile(r"^(\s*)(?:[-*+]|\d+\.)\s+")
 
 TEMPLATE_PLACEHOLDER_RE = re.compile(
     r"\{(?:DOMAIN|DOMAIN_ABBR|YYYY-MM-DD|NAME|LIST_NAMES|TOPIC_NAME|"
@@ -88,6 +88,16 @@ ZERO_SHA = "0000000000000000000000000000000000000000"
 SHA_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
 
 
+def _escape_annotation_data(value: str) -> str:
+    """Escape message data for GitHub Actions workflow commands."""
+    return value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
+def _escape_annotation_property(value: str) -> str:
+    """Escape a property value for GitHub Actions workflow commands."""
+    return _escape_annotation_data(value).replace(":", "%3A").replace(",", "%2C")
+
+
 @dataclass(frozen=True)
 class Finding:
     """A single validation error or warning on a meeting minutes file."""
@@ -99,19 +109,21 @@ class Finding:
     message: str
 
     def format_cli(self) -> str:
+        """Format the finding for human-readable CLI output."""
         prefix = "ERROR" if self.severity == "error" else "WARNING"
         return f"{self.rel_path}:{self.line}: {prefix} [{self.rule}] {self.message}"
 
     def format_github_annotation(self) -> str:
+        """Format the finding as an escaped GitHub Actions workflow command."""
         cmd = "error" if self.severity == "error" else "warning"
-        return (
-            f"::{cmd} file={self.rel_path},line={self.line},"
-            f"title={self.rule}::{self.message}"
-        )
+        rel_path = _escape_annotation_property(self.rel_path)
+        rule = _escape_annotation_property(self.rule)
+        msg = _escape_annotation_data(self.message)
+        return f"::{cmd} file={rel_path},line={self.line},title={rule}::{msg}"
 
 
 def should_validate_file(rel_path: str) -> bool:
-    """Returns True if rel_path is a candidate meeting minutes Markdown file."""
+    """Return True if rel_path is a candidate meeting minutes Markdown file."""
     norm = rel_path.strip().lstrip("./")
     if not norm.endswith(".md") or norm in IGNORED_FILES:
         return False
@@ -128,80 +140,89 @@ def _parse_iso_date(date_str: str) -> datetime.date | None:
         return None
 
 
-def validate_path_and_extract_date(
-    rel_path: str,
+def _validate_date_and_year(
+    norm: str,
+    year_dir: str,
+    date_str: str,
+    findings: list[Finding],
+) -> str | None:
+    """Validate that date_str is a real calendar date matching year_dir."""
+    if not _parse_iso_date(date_str):
+        findings.append(
+            Finding(
+                rel_path=norm,
+                line=1,
+                severity="error",
+                rule="invalid-date",
+                message=(f"Filename contains invalid calendar date '{date_str}'."),
+            )
+        )
+        return None
+
+    if year_dir != date_str[:4]:
+        findings.append(
+            Finding(
+                rel_path=norm,
+                line=1,
+                severity="error",
+                rule="invalid-path",
+                message=(
+                    f"Year directory '{year_dir}' does not match filename "
+                    f"date '{date_str}'."
+                ),
+            )
+        )
+    return date_str
+
+
+def _validate_gc_path(
+    norm: str,
+    parts: tuple[str, ...],
 ) -> tuple[str | None, list[Finding]]:
-    """Validates the repository path schema and extracts the expected YYYY-MM-DD."""
-    norm = rel_path.strip().lstrip("./")
-    parts = Path(norm).parts
+    """Validate a Governing Council minutes path (gc/<YYYY>/GC-YYYY-MM-DD)."""
     findings: list[Finding] = []
-
-    if parts[0] == "gc":
-        # Expected: gc/<YYYY>/GC-<YYYY-MM-DD>.md
-        if len(parts) != 3:
-            findings.append(
-                Finding(
-                    rel_path=norm,
-                    line=1,
-                    severity="error",
-                    rule="invalid-path",
-                    message=(
-                        f"GC minutes must be placed at 'gc/<YYYY>/GC-<YYYY-MM-DD>.md' "
-                        f"(got '{norm}')."
-                    ),
-                )
+    if len(parts) != 3:
+        findings.append(
+            Finding(
+                rel_path=norm,
+                line=1,
+                severity="error",
+                rule="invalid-path",
+                message=(
+                    "GC minutes must be placed at "
+                    f"'gc/<YYYY>/GC-<YYYY-MM-DD>.md' (got '{norm}')."
+                ),
             )
-            return None, findings
+        )
+        return None, findings
 
-        year_dir, filename = parts[1], parts[2]
-        m = GC_FILENAME_RE.match(filename)
-        if not m:
-            findings.append(
-                Finding(
-                    rel_path=norm,
-                    line=1,
-                    severity="error",
-                    rule="invalid-path",
-                    message=(
-                        f"GC minutes filename must match 'GC-YYYY-MM-DD.md' "
-                        f"(got '{filename}')."
-                    ),
-                )
+    year_dir, filename = parts[1], parts[2]
+    m = GC_FILENAME_RE.match(filename)
+    if not m:
+        findings.append(
+            Finding(
+                rel_path=norm,
+                line=1,
+                severity="error",
+                rule="invalid-path",
+                message=(
+                    "GC minutes filename must match 'GC-YYYY-MM-DD.md' "
+                    f"(got '{filename}')."
+                ),
             )
-            return None, findings
+        )
+        return None, findings
 
-        date_str = m.group(1)
-        if not _parse_iso_date(date_str):
-            findings.append(
-                Finding(
-                    rel_path=norm,
-                    line=1,
-                    severity="error",
-                    rule="invalid-date",
-                    message=f"Filename contains invalid calendar date '{date_str}'.",
-                )
-            )
-            return None, findings
+    date_str = _validate_date_and_year(norm, year_dir, m.group(1), findings)
+    return date_str, findings
 
-        if year_dir != date_str[:4]:
-            findings.append(
-                Finding(
-                    rel_path=norm,
-                    line=1,
-                    severity="error",
-                    rule="invalid-path",
-                    message=(
-                        f"Year directory '{year_dir}' does not match filename "
-                        f"date '{date_str}'."
-                    ),
-                )
-            )
-        return date_str, findings
 
-    # parts[0] == "tc"
-    # Expected either:
-    #   tc/<domain>/<YYYY>/<YYYY-MM-DD>.md (len == 4)
-    #   tc/<domain>/dwg/<wg>/<YYYY>/<YYYY-MM-DD>.md (len == 6)
+def _validate_tc_path(
+    norm: str,
+    parts: tuple[str, ...],
+) -> tuple[str | None, list[Finding]]:
+    """Validate a TC or DWG minutes path under tc/."""
+    findings: list[Finding] = []
     if len(parts) == 4:
         domain, year_dir, filename = parts[1], parts[2], parts[3]
         if domain not in VALID_DOMAINS:
@@ -276,59 +297,62 @@ def validate_path_and_extract_date(
                 severity="error",
                 rule="invalid-path",
                 message=(
-                    f"TC/DWG minutes filename must match 'YYYY-MM-DD.md' "
+                    "TC/DWG minutes filename must match 'YYYY-MM-DD.md' "
                     f"(got '{filename}')."
                 ),
             )
         )
         return None, findings
 
-    date_str = m.group(1)
-    if not _parse_iso_date(date_str):
-        findings.append(
-            Finding(
-                rel_path=norm,
-                line=1,
-                severity="error",
-                rule="invalid-date",
-                message=f"Filename contains invalid calendar date '{date_str}'.",
-            )
-        )
-        return None, findings
-
-    if year_dir != date_str[:4]:
-        findings.append(
-            Finding(
-                rel_path=norm,
-                line=1,
-                severity="error",
-                rule="invalid-path",
-                message=(
-                    f"Year directory '{year_dir}' does not match filename "
-                    f"date '{date_str}'."
-                ),
-            )
-        )
-
+    date_str = _validate_date_and_year(norm, year_dir, m.group(1), findings)
     return date_str, findings
+
+
+def validate_path_and_extract_date(
+    rel_path: str,
+) -> tuple[str | None, list[Finding]]:
+    """Validate repository path schema and extract the expected YYYY-MM-DD."""
+    norm = rel_path.strip().lstrip("./")
+    parts = Path(norm).parts
+    if parts and parts[0] == "gc":
+        return _validate_gc_path(norm, parts)
+    if parts and parts[0] == "tc":
+        return _validate_tc_path(norm, parts)
+    return None, [
+        Finding(
+            rel_path=norm,
+            line=1,
+            severity="error",
+            rule="invalid-path",
+            message=(
+                f"Meeting minutes must be placed under 'tc/' or 'gc/' (got '{norm}')."
+            ),
+        )
+    ]
 
 
 @dataclass
 class _TopicBlock:
-    """Tracks an active `- **Topic:**` block during validation."""
+    """Track an active `- **Topic:**` block during validation."""
 
     title: str
     line: int
     indent: int
     has_details: bool = False
-    linked_numbers: set[str] | None = None
-    prose_mentions: list[tuple[str, int]] | None = None
+    linked_numbers: set[str] = field(default_factory=set)
+    prose_mentions: list[tuple[str, int]] = field(default_factory=list)
 
-    def __post_init__(self) -> None:
-        if self.linked_numbers is None:
-            self.linked_numbers = set()
-        if self.prose_mentions is None:
-            self.prose_mentions = []
+    def record_line(
+        self,
+        raw_line: str,
+        line_no_code: str,
+        line_no: int,
+    ) -> None:
+        """Record GitHub links and prose PR/Issue mentions from a line."""
+        for link_m in GH_ITEM_LINK_RE.finditer(raw_line):
+            self.linked_numbers.add(link_m.group(1))
+        for prose_m in PROSE_ITEM_MENTION_RE.finditer(line_no_code):
+            self.prose_mentions.append((prose_m.group(1), line_no))
 
 
 def _flush_topic_warnings(
@@ -353,10 +377,9 @@ def _flush_topic_warnings(
             )
         )
 
-    linked = topic.linked_numbers or set()
     seen_unlinked: set[str] = set()
-    for num_str, line_no in topic.prose_mentions or []:
-        if num_str not in linked and num_str not in seen_unlinked:
+    for num_str, line_no in topic.prose_mentions:
+        if num_str not in topic.linked_numbers and num_str not in seen_unlinked:
             seen_unlinked.add(num_str)
             findings.append(
                 Finding(
@@ -366,143 +389,76 @@ def _flush_topic_warnings(
                     rule="unlinked-pr-or-issue",
                     message=(
                         f"Topic '{topic.title}' mentions #{num_str} without a "
-                        "full GitHub link; add a link so Circle-Back automation "
-                        "can reference it."
+                        "full GitHub link; add a link so Circle-Back "
+                        "automation can reference it."
                     ),
                 )
             )
 
 
-def validate_minutes_markdown(content: str, rel_path: str) -> list[Finding]:
-    """Validates a single meeting minutes Markdown file and returns findings."""
-    norm = rel_path.strip().lstrip("./")
-    expected_date, findings = validate_path_and_extract_date(norm)
+def _update_fence_state(
+    line: str,
+    active_fence: tuple[str, int] | None,
+) -> tuple[bool, tuple[str, int] | None]:
+    """Track CommonMark fenced code blocks by fence character and length."""
+    if active_fence is None:
+        m = OPEN_FENCE_RE.match(line)
+        if not m:
+            return False, None
+        fence_seq, info_str = m.group(1), m.group(2)
+        if fence_seq[0] == "`" and "`" in info_str:
+            return False, None
+        return True, (fence_seq[0], len(fence_seq))
 
-    in_fence = False
-    h1_line: int | None = None
-    h1_text: str | None = None
-    has_led_by = False
-    has_attendance = False
-    agenda_sections: list[str] = []
-    active_topic: _TopicBlock | None = None
+    fence_char, fence_len = active_fence
+    stripped = line.strip()
+    if len(stripped) >= fence_len and stripped == fence_char * len(stripped):
+        return True, None
+    return True, active_fence
 
-    for idx, line in enumerate(content.splitlines(), start=1):
-        if FENCE_RE.match(line):
-            in_fence = not in_fence
-            continue
-        if in_fence:
-            continue
 
-        for ph_match in TEMPLATE_PLACEHOLDER_RE.finditer(line):
-            findings.append(
-                Finding(
-                    rel_path=norm,
-                    line=idx,
-                    severity="error",
-                    rule="unfilled-template-placeholder",
-                    message=(
-                        f"Unfilled template placeholder '{ph_match.group(0)}' found."
-                    ),
-                )
+def _check_line_placeholders(
+    line_no_code: str,
+    idx: int,
+    norm: str,
+    findings: list[Finding],
+) -> None:
+    """Check non-code line for template placeholders and dummy links."""
+    for ph_match in TEMPLATE_PLACEHOLDER_RE.finditer(line_no_code):
+        placeholder = ph_match.group(0)
+        findings.append(
+            Finding(
+                rel_path=norm,
+                line=idx,
+                severity="error",
+                rule="unfilled-template-placeholder",
+                message=(f"Unfilled template placeholder '{placeholder}' found."),
             )
+        )
 
-        if DUMMY_LINK_RE.search(line):
-            findings.append(
-                Finding(
-                    rel_path=norm,
-                    line=idx,
-                    severity="error",
-                    rule="unfilled-template-placeholder",
-                    message="Placeholder link '](#)' must be replaced or removed.",
-                )
+    if DUMMY_LINK_RE.search(line_no_code):
+        findings.append(
+            Finding(
+                rel_path=norm,
+                line=idx,
+                severity="error",
+                rule="unfilled-template-placeholder",
+                message="Placeholder link '](#)' must be replaced or removed.",
             )
+        )
 
-        h1_match = H1_RE.match(line)
-        if h1_match and h1_line is None:
-            h1_line = idx
-            h1_text = h1_match.group(1).strip()
-            continue
 
-        if LED_BY_RE.match(line):
-            has_led_by = True
-
-        h2_match = H2_RE.match(line)
-        if h2_match:
-            _flush_topic_warnings(active_topic, norm, findings)
-            active_topic = None
-            sec_title = h2_match.group(1).strip()
-            if sec_title.lower() == "attendance":
-                has_attendance = True
-            else:
-                agenda_sections.append(sec_title)
-            continue
-
-        if EMPTY_TOPIC_RE.match(line):
-            _flush_topic_warnings(active_topic, norm, findings)
-            active_topic = None
-            findings.append(
-                Finding(
-                    rel_path=norm,
-                    line=idx,
-                    severity="error",
-                    rule="malformed-topic-marker",
-                    message=("Topic entry '- **Topic:**' is missing a topic title."),
-                )
-            )
-            continue
-
-        topic_match = CANONICAL_TOPIC_RE.match(line)
-        if topic_match:
-            _flush_topic_warnings(active_topic, norm, findings)
-            indent = len(topic_match.group(1))
-            title = topic_match.group(2).strip()
-            active_topic = _TopicBlock(title=title, line=idx, indent=indent)
-            for link_m in GH_ITEM_LINK_RE.finditer(line):
-                assert active_topic.linked_numbers is not None
-                active_topic.linked_numbers.add(link_m.group(1))
-            for prose_m in PROSE_ITEM_MENTION_RE.finditer(line):
-                assert active_topic.prose_mentions is not None
-                active_topic.prose_mentions.append((prose_m.group(1), idx))
-            continue
-
-        if MALFORMED_TOPIC_RE.match(line):
-            _flush_topic_warnings(active_topic, norm, findings)
-            active_topic = None
-            findings.append(
-                Finding(
-                    rel_path=norm,
-                    line=idx,
-                    severity="error",
-                    rule="malformed-topic-marker",
-                    message=(
-                        "Non-canonical topic marker; use '- **Topic:** <Title>' "
-                        "so automated tooling can parse it."
-                    ),
-                )
-            )
-            continue
-
-        if active_topic is not None:
-            stripped = line.strip()
-            if not stripped:
-                continue
-            current_indent = len(line) - len(line.lstrip())
-            list_match = LIST_ITEM_RE.match(line)
-            if list_match and len(list_match.group(1)) <= active_topic.indent:
-                _flush_topic_warnings(active_topic, norm, findings)
-                active_topic = None
-                continue
-            if current_indent > active_topic.indent:
-                active_topic.has_details = True
-                for link_m in GH_ITEM_LINK_RE.finditer(line):
-                    assert active_topic.linked_numbers is not None
-                    active_topic.linked_numbers.add(link_m.group(1))
-                for prose_m in PROSE_ITEM_MENTION_RE.finditer(line):
-                    assert active_topic.prose_mentions is not None
-                    active_topic.prose_mentions.append((prose_m.group(1), idx))
-
-    _flush_topic_warnings(active_topic, norm, findings)
-
+def _check_document_skeleton(
+    norm: str,
+    expected_date: str | None,
+    h1_line: int | None,
+    h1_text: str | None,
+    has_led_by: bool,
+    has_attendance: bool,
+    agenda_sections: list[str],
+    findings: list[Finding],
+) -> None:
+    """Verify document-level H1 title, metadata, and section requirements."""
     if h1_line is None or h1_text is None:
         findings.append(
             Finding(
@@ -515,23 +471,37 @@ def validate_minutes_markdown(content: str, rel_path: str) -> list[Finding]:
                 ),
             )
         )
-    elif expected_date is not None and expected_date not in h1_text:
-        dates_in_h1 = DATE_IN_TEXT_RE.findall(h1_text)
-        found_hint = (
-            f" (found '{dates_in_h1[0]}')" if dates_in_h1 else " (no date found)"
-        )
-        findings.append(
-            Finding(
-                rel_path=norm,
-                line=h1_line,
-                severity="error",
-                rule="title-date-mismatch",
-                message=(
-                    f"H1 title date{found_hint} does not match filename date "
-                    f"'{expected_date}'."
-                ),
+    else:
+        if not h1_text.upper().startswith("UCP "):
+            findings.append(
+                Finding(
+                    rel_path=norm,
+                    line=h1_line,
+                    severity="error",
+                    rule="missing-h1-title",
+                    message=(
+                        "Top-level H1 heading must start with '# UCP ...' "
+                        f"(got '# {h1_text}')."
+                    ),
+                )
             )
-        )
+        if expected_date is not None and expected_date not in h1_text:
+            dates_in_h1 = DATE_IN_TEXT_RE.findall(h1_text)
+            found_hint = (
+                f" (found '{dates_in_h1[0]}')" if dates_in_h1 else " (no date found)"
+            )
+            findings.append(
+                Finding(
+                    rel_path=norm,
+                    line=h1_line,
+                    severity="error",
+                    rule="title-date-mismatch",
+                    message=(
+                        f"H1 title date{found_hint} does not match "
+                        f"filename date '{expected_date}'."
+                    ),
+                )
+            )
 
     if not has_led_by:
         findings.append(
@@ -569,6 +539,129 @@ def validate_minutes_markdown(content: str, rel_path: str) -> list[Finding]:
             )
         )
 
+
+def _process_topic_line(
+    line: str,
+    line_no_code: str,
+    idx: int,
+    norm: str,
+    active_topic: _TopicBlock | None,
+    findings: list[Finding],
+) -> _TopicBlock | None:
+    """Process a non-heading line for topic markers and topic block details."""
+    if EMPTY_TOPIC_RE.match(line):
+        _flush_topic_warnings(active_topic, norm, findings)
+        findings.append(
+            Finding(
+                rel_path=norm,
+                line=idx,
+                severity="error",
+                rule="malformed-topic-marker",
+                message=("Topic entry '- **Topic:**' is missing a topic title."),
+            )
+        )
+        return None
+
+    topic_match = CANONICAL_TOPIC_RE.match(line)
+    if topic_match:
+        _flush_topic_warnings(active_topic, norm, findings)
+        indent = len(topic_match.group(1))
+        title = topic_match.group(2).strip()
+        new_topic = _TopicBlock(title=title, line=idx, indent=indent)
+        new_topic.record_line(line, line_no_code, idx)
+        return new_topic
+
+    if MALFORMED_TOPIC_RE.match(line):
+        _flush_topic_warnings(active_topic, norm, findings)
+        findings.append(
+            Finding(
+                rel_path=norm,
+                line=idx,
+                severity="error",
+                rule="malformed-topic-marker",
+                message=(
+                    "Non-canonical topic marker; use "
+                    "'- **Topic:** <Title>' so automated tooling "
+                    "can parse it."
+                ),
+            )
+        )
+        return None
+
+    if active_topic is not None and line.strip():
+        current_indent = len(line) - len(line.lstrip())
+        if current_indent <= active_topic.indent:
+            _flush_topic_warnings(active_topic, norm, findings)
+            return None
+        active_topic.has_details = True
+        active_topic.record_line(line, line_no_code, idx)
+
+    return active_topic
+
+
+def validate_minutes_markdown(content: str, rel_path: str) -> list[Finding]:
+    """Validate a single meeting minutes Markdown file and return findings."""
+    norm = rel_path.strip().lstrip("./")
+    expected_date, findings = validate_path_and_extract_date(norm)
+
+    active_fence: tuple[str, int] | None = None
+    h1_line: int | None = None
+    h1_text: str | None = None
+    seen_h2 = False
+    has_led_by = False
+    has_attendance = False
+    agenda_sections: list[str] = []
+    active_topic: _TopicBlock | None = None
+
+    for idx, line in enumerate(content.splitlines(), start=1):
+        skip_line, active_fence = _update_fence_state(line, active_fence)
+        if skip_line:
+            continue
+
+        line_no_code = INLINE_CODE_RE.sub("", line)
+        _check_line_placeholders(line_no_code, idx, norm, findings)
+
+        h1_match = H1_RE.match(line)
+        if h1_match and h1_line is None and not seen_h2:
+            h1_line = idx
+            h1_text = h1_match.group(1).strip()
+            continue
+
+        if LED_BY_RE.match(line):
+            has_led_by = True
+
+        h2_match = H2_RE.match(line)
+        if h2_match:
+            seen_h2 = True
+            _flush_topic_warnings(active_topic, norm, findings)
+            active_topic = None
+            sec_title = h2_match.group(1).strip()
+            if sec_title.lower() == "attendance":
+                has_attendance = True
+            else:
+                agenda_sections.append(sec_title)
+            continue
+
+        active_topic = _process_topic_line(
+            line=line,
+            line_no_code=line_no_code,
+            idx=idx,
+            norm=norm,
+            active_topic=active_topic,
+            findings=findings,
+        )
+
+    _flush_topic_warnings(active_topic, norm, findings)
+    _check_document_skeleton(
+        norm=norm,
+        expected_date=expected_date,
+        h1_line=h1_line,
+        h1_text=h1_text,
+        has_led_by=has_led_by,
+        has_attendance=has_attendance,
+        agenda_sections=agenda_sections,
+        findings=findings,
+    )
     return findings
 
 
@@ -580,7 +673,7 @@ def render_markdown_summary(
     validated_files: list[str],
     findings: list[Finding],
 ) -> str:
-    """Renders a Markdown summary table for GitHub Actions job summaries."""
+    """Render a Markdown summary table for GitHub Actions job summaries."""
     lines = ["### 📋 Meeting Minutes Structure Validation", ""]
     if not validated_files:
         lines.append(
@@ -599,8 +692,10 @@ def render_markdown_summary(
     lines.append("")
 
     if not findings:
-        for rel_path in validated_files:
-            lines.append(f"- ✅ `{rel_path}` — All structural checks passed.")
+        lines.extend(
+            f"- ✅ `{rel_path}` — All structural checks passed."
+            for rel_path in validated_files
+        )
         return "\n".join(lines)
 
     lines.extend(
@@ -620,7 +715,7 @@ def git_changed_minutes_files(
     base_sha: str | None,
     repo_root: Path,
 ) -> list[str]:
-    """Returns added or modified Markdown files under tc/ and gc/ since base_sha."""
+    """Return added or modified Markdown files under tc/ or gc/."""
     if not base_sha or base_sha == ZERO_SHA or not SHA_RE.match(base_sha):
         cmd = [
             "git",
@@ -655,7 +750,11 @@ def git_changed_minutes_files(
         check=False,
     )
     if proc.returncode != 0:
-        logger.warning("git diff returned %d: %s", proc.returncode, proc.stderr.strip())
+        logger.warning(
+            "git diff returned %d: %s",
+            proc.returncode,
+            proc.stderr.strip(),
+        )
         return []
 
     return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
@@ -665,7 +764,7 @@ def resolve_github_event_files(
     env: dict[str, str],
     repo_root: Path,
 ) -> list[str]:
-    """Resolves target minutes files from GitHub Actions environment variables."""
+    """Resolve target minutes files from GitHub Actions environment."""
     event_name = env.get("EVENT_NAME") or env.get("GITHUB_EVENT_NAME") or ""
     if event_name == "workflow_dispatch":
         input_file = (env.get("INPUT_MINUTES_FILE") or "").strip()
@@ -677,7 +776,8 @@ def resolve_github_event_files(
     return []
 
 
-def main(argv: list[str] | None = None) -> int:
+def _build_arg_parser() -> argparse.ArgumentParser:
+    """Create the CLI argument parser."""
     parser = argparse.ArgumentParser(
         description="Validate UCP meeting minutes Markdown structure."
     )
@@ -710,26 +810,36 @@ def main(argv: list[str] | None = None) -> int:
             "(defaults to GITHUB_STEP_SUMMARY if set)."
         ),
     )
+    return parser
 
-    args = parser.parse_args(argv)
+
+def _resolve_relative_posix_path(file_arg: str, repo_root: Path) -> tuple[Path, str]:
+    """Resolve file_arg to an absolute Path and repo-relative POSIX path."""
+    file_path = Path(file_arg)
+    if not file_path.is_absolute():
+        file_path = (repo_root / file_path).resolve()
+    try:
+        rel_path = file_path.relative_to(repo_root).as_posix()
+    except ValueError:
+        rel_path = Path(file_arg).as_posix()
+    return file_path, rel_path
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run the CLI structural validator and return an exit status code."""
+    args = _build_arg_parser().parse_args(argv)
     repo_root = Path(args.repo_root).resolve()
 
     target_files = list(args.files)
-    if not target_files and (os.getenv("EVENT_NAME") or os.getenv("GITHUB_EVENT_NAME")):
+    has_ci_event = bool(os.getenv("EVENT_NAME") or os.getenv("GITHUB_EVENT_NAME"))
+    if not target_files and has_ci_event:
         target_files = resolve_github_event_files(dict(os.environ), repo_root)
 
     validated_files: list[str] = []
     all_findings: list[Finding] = []
 
     for file_arg in target_files:
-        file_path = Path(file_arg)
-        if not file_path.is_absolute():
-            file_path = (repo_root / file_path).resolve()
-        try:
-            rel_path = file_path.relative_to(repo_root).as_posix()
-        except ValueError:
-            rel_path = Path(file_arg).as_posix()
-
+        file_path, rel_path = _resolve_relative_posix_path(file_arg, repo_root)
         if not should_validate_file(rel_path):
             logger.info("Skipping non-minutes file: %s", rel_path)
             continue
@@ -756,8 +866,7 @@ def main(argv: list[str] | None = None) -> int:
         with Path(args.summary_file).open("a", encoding="utf-8") as f:
             f.write(summary_md + "\n")
 
-    has_errors = any(f.severity == "error" for f in all_findings)
-    return 1 if has_errors else 0
+    return 1 if any(f.severity == "error" for f in all_findings) else 0
 
 
 if __name__ == "__main__":

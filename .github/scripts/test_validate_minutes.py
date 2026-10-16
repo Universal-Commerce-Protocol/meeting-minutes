@@ -40,7 +40,10 @@ VALID_TC_MINUTES = (
 
 
 class ValidateMinutesTest(unittest.TestCase):
+    """Test suite for validate_minutes."""
+
     def test_should_validate_file(self) -> None:
+        """Verify candidate meeting minutes path filtering."""
         self.assertTrue(
             validate_minutes.should_validate_file("tc/shopping/2026/2026-10-09.md")
         )
@@ -60,6 +63,7 @@ class ValidateMinutesTest(unittest.TestCase):
         self.assertFalse(validate_minutes.should_validate_file("tc/shopping/README.md"))
 
     def test_valid_tc_minutes_passes_with_zero_findings(self) -> None:
+        """Verify canonical TC minutes pass with zero findings."""
         findings = validate_minutes.validate_minutes_markdown(
             VALID_TC_MINUTES,
             rel_path="tc/shopping/2026/2026-10-09.md",
@@ -67,6 +71,7 @@ class ValidateMinutesTest(unittest.TestCase):
         self.assertEqual(findings, [])
 
     def test_valid_dwg_and_gc_paths_pass(self) -> None:
+        """Verify canonical DWG and GC minutes paths and headers pass."""
         dwg_md = VALID_TC_MINUTES.replace(
             "# UCP Shopping Tech Council (STC) Meeting - 2026-10-09",
             "# UCP Bulk Product Discovery DWG Meeting - 2026-09-16",
@@ -88,6 +93,7 @@ class ValidateMinutesTest(unittest.TestCase):
         self.assertEqual(gc_findings, [])
 
     def test_invalid_paths_and_dates_produce_errors(self) -> None:
+        """Verify malformed paths, domains, and calendar dates report errors."""
         _, f1 = validate_minutes.validate_path_and_extract_date(
             "tc/unknown/2026/2026-10-09.md"
         )
@@ -107,6 +113,7 @@ class ValidateMinutesTest(unittest.TestCase):
         self.assertEqual([f.rule for f in f4], ["invalid-date"])
 
     def test_detects_title_date_mismatch_and_missing_sections(self) -> None:
+        """Verify missing metadata, sections, and date mismatches fail."""
         bad_md = (
             "# UCP Shopping Tech Council (STC) Meeting - 2026-07-31\n\n"
             "## 1. General Topics\n\n"
@@ -123,7 +130,36 @@ class ValidateMinutesTest(unittest.TestCase):
         self.assertIn("missing-attendance", rules)
         self.assertTrue(all(f.severity == "error" for f in findings))
 
+    def test_detects_non_ucp_or_late_h1_title(self) -> None:
+        """Verify H1 must start with UCP and appear before H2 sections."""
+        non_ucp_h1 = VALID_TC_MINUTES.replace(
+            "# UCP Shopping Tech Council (STC) Meeting - 2026-10-09",
+            "# Shopping Tech Council (STC) Meeting - 2026-10-09",
+        )
+        findings_prefix = validate_minutes.validate_minutes_markdown(
+            non_ucp_h1,
+            rel_path="tc/shopping/2026/2026-10-09.md",
+        )
+        self.assertEqual(
+            [f.rule for f in findings_prefix],
+            ["missing-h1-title"],
+        )
+
+        late_h1 = (
+            "**Led by:** Amit Handa\n\n"
+            "## Attendance\n\n"
+            "- **Present:** Amit Handa\n\n"
+            "## 1. General Topics\n\n"
+            "# UCP Shopping Tech Council (STC) Meeting - 2026-10-09\n"
+        )
+        findings_late = validate_minutes.validate_minutes_markdown(
+            late_h1,
+            rel_path="tc/shopping/2026/2026-10-09.md",
+        )
+        self.assertEqual([f.rule for f in findings_late], ["missing-h1-title"])
+
     def test_detects_template_placeholders_and_malformed_topics(self) -> None:
+        """Verify template placeholders and non-canonical topics fail."""
         bad_md = (
             "# UCP {DOMAIN} Tech Council Meeting - 2026-10-09\n\n"
             "**Led by:** {NAME}\n\n"
@@ -142,7 +178,51 @@ class ValidateMinutesTest(unittest.TestCase):
         self.assertEqual(rules.count("unfilled-template-placeholder"), 3)
         self.assertEqual(rules.count("malformed-topic-marker"), 2)
 
+    def test_ignores_inline_code_and_nested_code_fences(self) -> None:
+        """Verify inline code spans and nested fences do not false-positive."""
+        md_with_code = (
+            "# UCP Shopping Tech Council (STC) Meeting - 2026-10-09\n\n"
+            "**Led by:** Amit Handa\n\n"
+            "## Attendance\n\n"
+            "- **Present:** Amit Handa\n\n"
+            "## 1. General Topics\n\n"
+            "- **Topic:** URI Template Standardization\n"
+            "  - **Notes:** Discussed `{DOMAIN}`, `{STATUS}`, `[link](#)`, "
+            "and `PR #123` in inline code.\n\n"
+            "````markdown\n"
+            "- Topic: Inside outer 4-backtick fence\n"
+            "```json\n"
+            '{"placeholder": "{DOMAIN}"}\n'
+            "```\n"
+            "[dummy](#)\n"
+            "````\n"
+        )
+        findings = validate_minutes.validate_minutes_markdown(
+            md_with_code,
+            rel_path="tc/shopping/2026/2026-10-09.md",
+        )
+        self.assertEqual(findings, [])
+
+    def test_closes_topic_on_non_list_top_level_blocks(self) -> None:
+        """Verify top-level blockquotes or subheadings close active topics."""
+        md_with_blockquote = (
+            "# UCP Shopping Tech Council (STC) Meeting - 2026-10-09\n\n"
+            "**Led by:** Amit Handa\n\n"
+            "## Attendance\n\n"
+            "- **Present:** Amit Handa\n\n"
+            "## 1. General Topics\n\n"
+            "- **Topic:** Empty Topic Before Blockquote\n\n"
+            "> **Note:** DWGs operate under DTC oversight.\n"
+            "  Indented continuation of blockquote mentioning PR #555.\n"
+        )
+        findings = validate_minutes.validate_minutes_markdown(
+            md_with_blockquote,
+            rel_path="tc/shopping/2026/2026-10-09.md",
+        )
+        self.assertEqual([f.rule for f in findings], ["empty-topic-block"])
+
     def test_emits_soft_warnings_for_unlinked_pr_and_empty_topic(self) -> None:
+        """Verify unlinked PR mentions and empty topics emit soft warnings."""
         warn_md = (
             "# UCP Shopping Tech Council (STC) Meeting - 2026-10-09\n\n"
             "**Led by:** Amit Handa\n\n"
@@ -166,7 +246,23 @@ class ValidateMinutesTest(unittest.TestCase):
         self.assertIn("#919", by_rule["unlinked-pr-or-issue"].message)
         self.assertNotIn("#659", by_rule["unlinked-pr-or-issue"].message)
 
+    def test_github_annotation_escapes_special_characters(self) -> None:
+        """Verify workflow command escaping for properties and message data."""
+        finding = validate_minutes.Finding(
+            rel_path="tc/shopping/2026/bad:file,name%.md",
+            line=10,
+            severity="warning",
+            rule="custom:rule,1",
+            message="Line 1\nLine 2\r100% done",
+        )
+        self.assertEqual(
+            finding.format_github_annotation(),
+            "::warning file=tc/shopping/2026/bad%3Afile%2Cname%25.md,"
+            "line=10,title=custom%3Arule%2C1::Line 1%0ALine 2%0D100%25 done",
+        )
+
     def test_main_returns_zero_on_warnings_and_nonzero_on_errors(self) -> None:
+        """Verify CLI exit code is 0 for warnings and 1 for hard errors."""
         with tempfile.TemporaryDirectory() as tmpdir:
             root = pathlib.Path(tmpdir)
             minutes_path = root / "tc" / "shopping" / "2026" / "2026-10-09.md"

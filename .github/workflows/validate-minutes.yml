@@ -28,6 +28,8 @@ on:
     paths:
       - "tc/**/*.md"
       - "gc/**/*.md"
+      - ".github/scripts/*validate_minutes.py"
+      - ".github/workflows/validate-minutes.yml"
   workflow_dispatch:
     inputs:
       minutes_file:
