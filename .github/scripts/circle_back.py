@@ -49,7 +49,8 @@ TOPIC_RE = re.compile(
     r"^(\s*)[-*+]\s+(?:\*\*Topic:\*\*|\*\*Topic\*\*:|Topic:)\s*(.+?)\s*$"
 )
 LIST_ITEM_RE = re.compile(r"^(\s*)(?:[-*+]|\d+\.)\s+")
-FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
+OPEN_FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
+INLINE_CODE_RE = re.compile(r"`+[^`]+`+")
 GH_LINK_RE = re.compile(
     r"https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/(pull|issues)/(\d+)(?![0-9])"
 )
@@ -126,25 +127,42 @@ def github_heading_slug(heading_text: str) -> str:
     return slug.replace(" ", "-")
 
 
+def _normalize_rel_path(rel_path: str) -> str:
+    """Normalizes a repo-relative path without stripping leading dots on dotfiles."""
+    norm = Path(rel_path.strip()).as_posix()
+    while norm.startswith("./"):
+        norm = norm.removeprefix("./")
+    return norm.lstrip("/")
+
+
 def is_meeting_minutes_file(rel_path: str) -> bool:
     """Returns True if rel_path is a dated TC/DWG/GC meeting minutes file."""
-    norm = rel_path.strip().lstrip("./")
+    norm = _normalize_rel_path(rel_path)
     parts = Path(norm).parts
     if len(parts) < 2 or parts[0] not in ("tc", "gc"):
         return False
     return bool(MINUTES_FILENAME_RE.match(parts[-1]))
 
 
+def _strip_outer_bold(text: str) -> str:
+    """Strips outer **...** only when wrapping a single bold span."""
+    if (
+        text.startswith("**")
+        and text.endswith("**")
+        and len(text) > 4
+        and "**" not in text[2:-2]
+    ):
+        return text[2:-2].strip()
+    return text
+
+
 def _clean_topic_title(raw_title: str) -> str:
     """Strips redundant outer bold markers and inline URLs from a topic title."""
-    cleaned = raw_title.strip()
-    if cleaned.startswith("**") and cleaned.endswith("**") and len(cleaned) > 4:
-        cleaned = cleaned[2:-2].strip()
+    cleaned = _strip_outer_bold(raw_title.strip())
     cleaned = INLINE_MD_LINK_RE.sub(r"\1", cleaned)
     cleaned = TRAILING_AUTOLINK_PAREN_RE.sub("", cleaned)
     cleaned = AUTOLINK_RE.sub("", cleaned).strip()
-    if cleaned.startswith("**") and cleaned.endswith("**") and len(cleaned) > 4:
-        cleaned = cleaned[2:-2].strip()
+    cleaned = _strip_outer_bold(cleaned)
     return cleaned or raw_title.strip(" *<>")
 
 
@@ -155,21 +173,32 @@ def parse_minutes_markdown(
     minutes_repo: str = DEFAULT_MINUTES_REPO,
 ) -> ParsedMinutes:
     """Parses a meeting minutes Markdown string and extracts PR/Issue targets."""
-    norm_path = rel_path.strip().lstrip("./")
+    norm_path = _normalize_rel_path(rel_path)
     default_title = Path(norm_path).stem
     meeting_title = default_title
     current_section_slug = ""
     current_topic: str | None = None
     current_topic_indent: int | None = None
-    in_fence = False
+    fence_char: str | None = None
+    fence_len: int = 0
 
     targets_by_key: dict[tuple[str, str, int], CircleBackTarget] = {}
 
     for line in content.splitlines():
-        if FENCE_RE.match(line):
-            in_fence = not in_fence
+        fence_match = OPEN_FENCE_RE.match(line)
+        if fence_char is not None:
+            if (
+                fence_match
+                and fence_match.group(1)[0] == fence_char
+                and len(fence_match.group(1)) >= fence_len
+                and not fence_match.group(2).strip()
+            ):
+                fence_char = None
+                fence_len = 0
             continue
-        if in_fence:
+        if fence_match:
+            fence_char = fence_match.group(1)[0]
+            fence_len = len(fence_match.group(1))
             continue
 
         h1_match = H1_RE.match(line)
@@ -209,7 +238,8 @@ def parse_minutes_markdown(
         if not current_topic:
             continue
 
-        for match in GH_LINK_RE.finditer(line):
+        line_without_code = INLINE_CODE_RE.sub("", line)
+        for match in GH_LINK_RE.finditer(line_without_code):
             org, repo, kind, num_str = match.groups()
             if org.lower() != target_org.lower():
                 continue
@@ -237,7 +267,7 @@ def parse_minutes_markdown(
 
 def comment_marker(rel_path: str) -> str:
     """Returns the hidden HTML marker used to ensure idempotency per minutes file."""
-    norm_path = rel_path.strip().lstrip("./")
+    norm_path = _normalize_rel_path(rel_path)
     return f"<!-- ucp-meeting-minutes: {norm_path} -->"
 
 
@@ -287,7 +317,7 @@ class GitHubApiClient:
     ):
         self.token = token
         self.api_url = api_url.rstrip("/")
-        self._state_cache: dict[tuple[str, str, str, int], str] = {}
+        self._state_cache: dict[tuple[str, str, int], tuple[str, str]] = {}
 
     def _request(
         self,
@@ -323,21 +353,24 @@ class GitHubApiClient:
         cache_key = (
             target.org.lower(),
             target.repo.lower(),
-            target.kind,
             target.number,
         )
         if cache_key in self._state_cache:
-            return self._state_cache[cache_key]
+            state, resolved_kind = self._state_cache[cache_key]
+            target.kind = resolved_kind
+            return state
 
         endpoint = "pulls" if target.kind == "pull" else "issues"
         data = self._request(
             "GET", f"/repos/{target.org}/{target.repo}/{endpoint}/{target.number}"
         )
+        resolved_kind = target.kind
         if not isinstance(data, dict):
             state = "unknown"
         elif target.kind == "pull" and data.get("merged"):
             state = "merged"
         elif isinstance(data.get("pull_request"), dict):
+            resolved_kind = "pull"
             target.kind = "pull"
             if data["pull_request"].get("merged_at"):
                 state = "merged"
@@ -346,7 +379,7 @@ class GitHubApiClient:
         else:
             state = str(data.get("state", "unknown"))
 
-        self._state_cache[cache_key] = state
+        self._state_cache[cache_key] = (state, resolved_kind)
         return state
 
     def has_comment_with_marker(self, target: CircleBackTarget, marker: str) -> bool:
@@ -432,7 +465,12 @@ def process_minutes(
     for target in parsed.targets:
         try:
             state = client.get_target_state(target)
-        except Exception as exc:
+        except (
+            urllib.error.URLError,
+            json.JSONDecodeError,
+            ValueError,
+            OSError,
+        ) as exc:
             logger.error("  Error fetching %s: %s", target.short_ref, exc)
             body = format_comment(
                 parsed,
@@ -491,7 +529,12 @@ def process_minutes(
 
         try:
             already_commented = client.has_comment_with_marker(target, marker)
-        except Exception as exc:
+        except (
+            urllib.error.URLError,
+            json.JSONDecodeError,
+            ValueError,
+            OSError,
+        ) as exc:
             logger.error("  Error checking comments on %s: %s", target.short_ref, exc)
             results.append(
                 TargetResult(
@@ -530,7 +573,12 @@ def process_minutes(
                         comment_body=body,
                     )
                 )
-            except Exception as exc:
+            except (
+                urllib.error.URLError,
+                json.JSONDecodeError,
+                ValueError,
+                OSError,
+            ) as exc:
                 logger.error("  Error posting comment on %s: %s", target.short_ref, exc)
                 results.append(
                     TargetResult(
@@ -670,6 +718,8 @@ def git_changed_minutes_files(
         cmd = [
             "git",
             "diff-tree",
+            "-m",
+            "--first-parent",
             "--no-commit-id",
             "--name-only",
             "-r",
@@ -824,7 +874,8 @@ def main(argv: list[str] | None = None) -> int:
         try:
             rel_path = file_path.relative_to(repo_root).as_posix()
         except ValueError:
-            rel_path = Path(file_arg).as_posix()
+            logger.warning("Skipping path outside repository root: %s", file_arg)
+            continue
 
         if not is_meeting_minutes_file(rel_path):
             logger.info("Skipping non-minutes file: %s", rel_path)

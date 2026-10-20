@@ -79,6 +79,13 @@ class CircleBackTest(unittest.TestCase):
         self.assertFalse(circle_back.is_meeting_minutes_file("tc/dwg-template.md"))
         self.assertFalse(circle_back.is_meeting_minutes_file("gc/template.md"))
         self.assertFalse(circle_back.is_meeting_minutes_file("tc/shopping/README.md"))
+        self.assertFalse(
+            circle_back.is_meeting_minutes_file(".github/scripts/circle_back.py")
+        )
+        self.assertEqual(
+            circle_back._normalize_rel_path("./.github/scripts/circle_back.py"),
+            ".github/scripts/circle_back.py",
+        )
 
     def test_github_heading_slug(self) -> None:
         self.assertEqual(
@@ -261,6 +268,7 @@ class CircleBackTest(unittest.TestCase):
                         str(summary_file),
                         "tc/shopping/2026/2026-10-09.md",
                         "README.md",
+                        "../outside/tc/2026-10-09.md",
                     ]
                 )
             self.assertEqual(rc, 0)
@@ -358,6 +366,12 @@ class CircleBackTest(unittest.TestCase):
             kind="issues",
             number=481,
         )
+        second_target = circle_back.CircleBackTarget(
+            org="Universal-Commerce-Protocol",
+            repo="ucp",
+            kind="issues",
+            number=481,
+        )
         with mock.patch.object(
             client,
             "_request",
@@ -365,11 +379,65 @@ class CircleBackTest(unittest.TestCase):
                 "state": "closed",
                 "pull_request": {"merged_at": "2026-07-01T00:00:00Z"},
             },
-        ):
+        ) as mock_req:
             state = client.get_target_state(target)
+            cached_state = client.get_target_state(second_target)
         self.assertEqual(state, "merged")
+        self.assertEqual(cached_state, "merged")
         self.assertEqual(target.kind, "pull")
         self.assertEqual(target.item_noun, "pull request")
+        self.assertEqual(second_target.kind, "pull")
+        self.assertEqual(second_target.item_noun, "pull request")
+        mock_req.assert_called_once()
+
+    def test_clean_topic_title_preserves_multiple_bold_spans(self) -> None:
+        self.assertEqual(
+            circle_back._clean_topic_title("**Single Bold Topic**"),
+            "Single Bold Topic",
+        )
+        self.assertEqual(
+            circle_back._clean_topic_title(
+                "**Ask Capability** and **Cart Capability**"
+            ),
+            "**Ask Capability** and **Cart Capability**",
+        )
+
+    def test_parse_minutes_ignores_inline_code_and_mismatched_fences(self) -> None:
+        md = (
+            "# UCP Shopping Tech Council (STC) Meeting - 2026-10-09\n\n"
+            "## 1. General Topics\n\n"
+            "- **Topic:** Inline Code and Fences\n"
+            "  - **Notes:** Ignore `https://github.com/Universal-Commerce-Protocol/ucp/pull/777` in backticks.\n"
+            "    ~~~markdown\n"
+            "    ```\n"
+            "    https://github.com/Universal-Commerce-Protocol/ucp/pull/888\n"
+            "    ```\n"
+            "    ~~~\n"
+            "  - **Context:** [Real PR](https://github.com/Universal-Commerce-Protocol/ucp/pull/897)\n"
+        )
+        parsed = circle_back.parse_minutes_markdown(
+            md,
+            rel_path="tc/shopping/2026/2026-10-09.md",
+        )
+        self.assertEqual([t.short_ref for t in parsed.targets], ["ucp#897"])
+
+    def test_git_changed_minutes_files_uses_merge_flag_on_diff_tree(self) -> None:
+        root = pathlib.Path(".")
+        with mock.patch("subprocess.run") as mock_run:
+            mock_run.return_value = mock.MagicMock(
+                returncode=0,
+                stdout="tc/shopping/2026/2026-10-09.md\n",
+                stderr="",
+            )
+            files = circle_back.git_changed_minutes_files(
+                circle_back.ZERO_SHA,
+                root,
+            )
+        self.assertEqual(files, ["tc/shopping/2026/2026-10-09.md"])
+        called_cmd = mock_run.call_args[0][0]
+        self.assertIn("diff-tree", called_cmd)
+        self.assertIn("-m", called_cmd)
+        self.assertIn("--first-parent", called_cmd)
 
     def test_render_markdown_summary_escapes_table_pipes(self) -> None:
         target = circle_back.CircleBackTarget(
