@@ -1,0 +1,40 @@
+# UCP Payments Tech Council (PTC) Meeting - 2026-10-15
+
+**Led by:** Drew Olson
+
+## Attendance
+
+- **Present:** Drew Olson, Archana Malhotra, Daniel Wyckoff, Ed Siok, Jose Mendez, Fabrice Cheng, Prasad Wangikar, Prateek Dudeja, Steven Chen, Simon Farrow, Vita Valeikaitė
+
+## 1. General Topics
+
+- **Topic:** UCP summit payments session planning
+  - **Notes:** Hosting a payments session at the UCP summit featuring an overview and an interactive component.
+  - **Notes:** Drew Olson requested volunteers from the PTC to lead or co-present the session.
+
+## 2. Open Discussions & DTC PR Reviews
+
+- **Topic:** Domain Working Groups
+  - **BNPL**
+    - Archana Malhotra presented the draft charter for the buy-now-pay-later (BNPL) domain working group, outlining goals to standardize support for BNPL options alongside multi-instrument and upfront payment choices.
+    - The group discussed the charter, emphasizing the flexibility of allowing individual providers and payment handlers to manage implementations while keeping third-party terms separated.
+    - The group will continue to iterate and define phases, milestones and timelines before bringing to UCP general council.
+  - **Tokenization**
+    - Prateek Dudeja presented the charter for the tokenization domain working group, targeting card-backed markets in phase one and utilizing device-bound, user account, and agent-bound credentials to meet strong customer authentication requirements and enable autonomous agent purchases by the end of the first quarter of 2027.
+    - Confirmed that representatives from Visa, Mastercard, and American Express expressed interest in joining.
+
+- **Topic:** PR Discussions
+  - **Local Services Technical Council Proposal [PR 922](https://github.com/Universal-Commerce-Protocol/ucp/issues/922):** Prasad Wangikar presented a proposal for local services as a technical council focusing on scheduling, limited resources, and reservations such as restaurant bookings, spa appointments, or plumber visits. Universal Service Protocol will merge into the Universal Commerce Protocol, with version one focusing primarily on bookings and rendering services without major immediate changes to payment processing.
+  - **Agentic Donations Proposal [PR 924](https://github.com/Universal-Commerce-Protocol/ucp/issues/924):** Prasad Wangikar introduced a proposal for agentic donations under the shopping technical council, explaining the need to surface nonprofit catalogs, handle multi-entity donations, platform tips, and receipts providing tax benefits. The group discussed complex transparency and merchant-of-record questions involved in splitting funds between for-profit platforms and nonprofit entities, and how charitable roundups and split payments compare to traditional checkouts, with caution about the complexities of paying multiple entities from a single checkout.
+  - The group split PTC ownership for open PRs:
+    - [PR 890](https://github.com/Universal-Commerce-Protocol/ucp/pull/890)
+    - [PR 897](https://github.com/Universal-Commerce-Protocol/ucp/pull/897)
+    - [PR 584](https://github.com/Universal-Commerce-Protocol/ucp/pull/584)
+    - [PR 791](https://github.com/Universal-Commerce-Protocol/ucp/pull/791)
+    - [PR 792](https://github.com/Universal-Commerce-Protocol/ucp/pull/792)
+
+## 3. New Action Items
+
+- [Archana Malhotra] Define Buy Now Pay Later Deliverables: Define granular deliverables and a timeline for the Buy Now Pay Later charter before bringing to GC.
+- [Prateek Dudeja] Tokenization Charter Update & Partner Outreach: Update Tokenization charter based on feedback; Create and send invites to partners who expressed interest in the domain working group, including Networks.
+- [Group] Review assigned PRs and approve / make progress.
