@@ -45,6 +45,7 @@ When a DWG is chartered, create `tc/<sponsoring-domain>/dwg/<working-group>/` wi
 1. Copy the relevant template (`tc/template.md`, `tc/dwg-template.md`, or `gc/template.md`).
 2. Save it to the correct directory using the `YYYY-MM-DD.md` naming convention, creating the year directory if needed.
 3. Open a pull request. Approval requirements are enforced per-path; see [`meeting-minutes-rules.yml`](https://github.com/Universal-Commerce-Protocol/.github/blob/main/org-tools/governance/rules/meeting-minutes-rules.yml).
+4. Any open UCP pull requests or issues linked under `- **Topic:**` entries are previewed on the pull request and automatically receive a link-back comment once the minutes are merged to `main`.
 
 ## History
 
