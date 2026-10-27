@@ -1,0 +1,98 @@
+#   Copyright 2026 UCP Authors
+#
+#   Licensed under the Apache License, Version 2.0 (the "License");
+#   you may not use this file except in compliance with the License.
+#   You may obtain a copy of the License at
+#
+#       http://www.apache.org/licenses/LICENSE-2.0
+#
+#   Unless required by applicable law or agreed to in writing, software
+#   distributed under the License is distributed on an "AS IS" BASIS,
+#   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#   See the License for the specific language governing permissions and
+#   limitations under the License.
+
+---
+name: Meeting Minutes Circle-Back
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "tc/**/*.md"
+      - "gc/**/*.md"
+      - ".github/scripts/**"
+      - ".github/workflows/circle-back.yml"
+  push:
+    branches: [main]
+    paths:
+      - "tc/**/*.md"
+      - "gc/**/*.md"
+  workflow_dispatch:
+    inputs:
+      minutes_file:
+        description: "Path to meeting minutes Markdown file (e.g., tc/shopping/2026/2026-10-09.md)"
+        required: true
+        type: string
+      apply:
+        description: "Actually post comments to open PRs/Issues (false = dry-run preview only)"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  preview:
+    name: Circle-Back Preview
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read  # Read repository contents and git history
+      pull-requests: write  # Post or update sticky circle-back preview comment
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Run unit tests
+        run: python3 -m unittest discover -s .github/scripts -p "test_circle_back.py" -v
+
+      - name: Preview Circle-Back
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          ORG_OWNER: ${{ github.repository_owner }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 .github/scripts/circle_back.py
+
+  apply:
+    name: Circle-Back Apply
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read  # Read repository contents; cross-repo writes use ORG_TRIAGE_TOKEN
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Run unit tests
+        run: python3 -m unittest discover -s .github/scripts -p "test_circle_back.py" -v
+
+      - name: Run Circle-Back
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          INPUT_MINUTES_FILE: ${{ inputs.minutes_file }}
+          INPUT_APPLY: ${{ inputs.apply }}
+          ORG_OWNER: ${{ github.repository_owner }}
+          ORG_TRIAGE_TOKEN: ${{ (github.event_name == 'push' || inputs.apply) && secrets.ORG_TRIAGE_TOKEN || '' }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 .github/scripts/circle_back.py
