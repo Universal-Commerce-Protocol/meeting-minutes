@@ -44,32 +44,55 @@ permissions:
   contents: read
 
 jobs:
-  circle-back:
-    name: Circle-Back PRs & Issues
+  preview:
+    name: Circle-Back Preview
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     permissions:
-      contents: read
-      issues: write
-      pull-requests: write
+      contents: read  # Read repository contents and git history
+      pull-requests: write  # Post or update sticky circle-back preview comment
     steps:
       - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
 
       - name: Run unit tests
-        run: python3 -m unittest discover -s .github/scripts -v
+        run: python3 -m unittest discover -s .github/scripts -p "test_circle_back.py" -v
+
+      - name: Preview Circle-Back
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          ORG_OWNER: ${{ github.repository_owner }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 .github/scripts/circle_back.py
+
+  apply:
+    name: Circle-Back Apply
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read  # Read repository contents; cross-repo writes use ORG_TRIAGE_TOKEN
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Run unit tests
+        run: python3 -m unittest discover -s .github/scripts -p "test_circle_back.py" -v
 
       - name: Run Circle-Back
         env:
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           BEFORE_SHA: ${{ github.event.before }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
           INPUT_MINUTES_FILE: ${{ inputs.minutes_file }}
           INPUT_APPLY: ${{ inputs.apply }}
           ORG_OWNER: ${{ github.repository_owner }}
-          ORG_TRIAGE_TOKEN: ${{ secrets.ORG_TRIAGE_TOKEN }}
+          ORG_TRIAGE_TOKEN: ${{ (github.event_name == 'push' || inputs.apply) && secrets.ORG_TRIAGE_TOKEN || '' }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python3 .github/scripts/circle_back.py

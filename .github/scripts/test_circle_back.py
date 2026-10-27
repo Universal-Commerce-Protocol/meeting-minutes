@@ -407,7 +407,9 @@ class CircleBackTest(unittest.TestCase):
             "# UCP Shopping Tech Council (STC) Meeting - 2026-10-09\n\n"
             "## 1. General Topics\n\n"
             "- **Topic:** Inline Code and Fences\n"
-            "  - **Notes:** Ignore `https://github.com/Universal-Commerce-Protocol/ucp/pull/777` in backticks.\n"
+            "  - **Notes:** Ignore "
+            "`https://github.com/Universal-Commerce-Protocol/ucp/pull/777` "
+            "in backticks.\n"
             "    ~~~markdown\n"
             "    ```\n"
             "    https://github.com/Universal-Commerce-Protocol/ucp/pull/888\n"
@@ -462,6 +464,106 @@ class CircleBackTest(unittest.TestCase):
         summary = circle_back.render_markdown_summary([(parsed, [res])], apply=False)
         self.assertIn(r"• *Add Foo \| Bar*", summary)
         self.assertIn(r"(`HTTP 500 \| Bad Gateway`)", summary)
+
+    def test_parse_minutes_closes_topic_on_top_level_blockquote_or_paragraph(
+        self,
+    ) -> None:
+        md = (
+            "# UCP Bulk Product Discovery DWG Meeting - 2026-09-16\n\n"
+            "## 2. Technical Discussions & Working Group Consensus\n\n"
+            "- **Topic:** Bulk Catalog Pagination\n"
+            "  - **Discussion:** Reviewed cursor pagination.\n\n"
+            "  > Indented quote inside topic referencing "
+            "[PR 101](https://github.com/Universal-Commerce-Protocol/ucp/pull/101)\n"
+            "  - **Context:** [PR 102]"
+            "(https://github.com/Universal-Commerce-Protocol/ucp/pull/102)\n\n"
+            "> **Note:** DWGs operate under DTC oversight; see "
+            "[Issue 201](https://github.com/Universal-Commerce-Protocol/ucp/issues/201).\n\n"
+            "- **Topic:** Feed Format Alignment\n"
+            "  - **Context:** [PR 103]"
+            "(https://github.com/Universal-Commerce-Protocol/ucp/pull/103)\n\n"
+            "Top-level wrap-up paragraph mentioning "
+            "[PR 202](https://github.com/Universal-Commerce-Protocol/ucp/pull/202).\n"
+        )
+        parsed = circle_back.parse_minutes_markdown(
+            md,
+            rel_path="tc/shopping/dwg/bulk-product-discovery/2026/2026-09-16.md",
+        )
+        refs = {t.short_ref: t for t in parsed.targets}
+        self.assertEqual(list(refs.keys()), ["ucp#101", "ucp#102", "ucp#103"])
+        self.assertEqual(
+            [topic.title for topic in refs["ucp#101"].topics],
+            ["Bulk Catalog Pagination"],
+        )
+        self.assertEqual(
+            [topic.title for topic in refs["ucp#103"].topics],
+            ["Feed Format Alignment"],
+        )
+
+    def test_parse_minutes_triple_backtick_inline_span_does_not_open_fence(
+        self,
+    ) -> None:
+        md = (
+            "# UCP Shopping Tech Council (STC) Meeting - 2026-10-09\n\n"
+            "## 1. General Topics\n\n"
+            "- **Topic:** Fence Edge Case\n"
+            "  ```inline triple-backtick code span```\n"
+            "  - **Context:** [Real PR]"
+            "(https://github.com/Universal-Commerce-Protocol/ucp/pull/897)\n"
+        )
+        parsed = circle_back.parse_minutes_markdown(
+            md,
+            rel_path="tc/shopping/2026/2026-10-09.md",
+        )
+        self.assertEqual([t.short_ref for t in parsed.targets], ["ucp#897"])
+
+    def test_resolve_default_token_falls_back_when_triage_token_empty(self) -> None:
+        self.assertEqual(
+            circle_back.resolve_default_token(
+                {"ORG_TRIAGE_TOKEN": "ghp_triage", "GITHUB_TOKEN": "ghs_default"}
+            ),
+            "ghp_triage",
+        )
+        self.assertEqual(
+            circle_back.resolve_default_token(
+                {"ORG_TRIAGE_TOKEN": "", "GITHUB_TOKEN": "ghs_default"}
+            ),
+            "ghs_default",
+        )
+        self.assertEqual(
+            circle_back.resolve_default_token(
+                {"ORG_TRIAGE_TOKEN": "   ", "GITHUB_TOKEN": "ghs_default"}
+            ),
+            "ghs_default",
+        )
+        self.assertIsNone(
+            circle_back.resolve_default_token(
+                {"ORG_TRIAGE_TOKEN": "", "GITHUB_TOKEN": ""}
+            )
+        )
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            mock.patch.dict(
+                "os.environ",
+                {"ORG_TRIAGE_TOKEN": "", "GITHUB_TOKEN": "ghs_fallback"},
+                clear=False,
+            ),
+            mock.patch.object(circle_back, "GitHubApiClient") as mock_client_cls,
+        ):
+            root = pathlib.Path(tmpdir)
+            minutes_file = root / "tc" / "shopping" / "2026" / "2026-10-09.md"
+            minutes_file.parent.mkdir(parents=True)
+            minutes_file.write_text(SAMPLE_MINUTES, encoding="utf-8")
+            mock_client_cls.return_value.get_target_state.return_value = "merged"
+
+            rc = circle_back.main(
+                ["--repo-root", str(root), "tc/shopping/2026/2026-10-09.md"]
+            )
+            self.assertEqual(rc, 0)
+            mock_client_cls.assert_called_once_with(
+                token="ghs_fallback",
+                api_url="https://api.github.com",
+            )
 
 
 if __name__ == "__main__":

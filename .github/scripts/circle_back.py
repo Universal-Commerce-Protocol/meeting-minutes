@@ -32,6 +32,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -48,7 +49,6 @@ SECTION_HEADING_RE = re.compile(r"^#{2,6}\s+(.+?)\s*$")
 TOPIC_RE = re.compile(
     r"^(\s*)[-*+]\s+(?:\*\*Topic:\*\*|\*\*Topic\*\*:|Topic:)\s*(.+?)\s*$"
 )
-LIST_ITEM_RE = re.compile(r"^(\s*)(?:[-*+]|\d+\.)\s+")
 OPEN_FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
 INLINE_CODE_RE = re.compile(r"`+[^`]+`+")
 GH_LINK_RE = re.compile(
@@ -166,6 +166,27 @@ def _clean_topic_title(raw_title: str) -> str:
     return cleaned or raw_title.strip(" *<>")
 
 
+def _update_fence_state(
+    line: str,
+    active_fence: tuple[str, int] | None,
+) -> tuple[bool, tuple[str, int] | None]:
+    """Tracks CommonMark fenced code blocks by fence character and length."""
+    if active_fence is None:
+        m = OPEN_FENCE_RE.match(line)
+        if not m:
+            return False, None
+        fence_seq, info_str = m.group(1), m.group(2)
+        if fence_seq[0] == "`" and "`" in info_str:
+            return False, None
+        return True, (fence_seq[0], len(fence_seq))
+
+    fence_char, fence_len = active_fence
+    stripped = line.strip()
+    if len(stripped) >= fence_len and stripped == fence_char * len(stripped):
+        return True, None
+    return True, active_fence
+
+
 def parse_minutes_markdown(
     content: str,
     rel_path: str,
@@ -179,26 +200,13 @@ def parse_minutes_markdown(
     current_section_slug = ""
     current_topic: str | None = None
     current_topic_indent: int | None = None
-    fence_char: str | None = None
-    fence_len: int = 0
+    active_fence: tuple[str, int] | None = None
 
     targets_by_key: dict[tuple[str, str, int], CircleBackTarget] = {}
 
     for line in content.splitlines():
-        fence_match = OPEN_FENCE_RE.match(line)
-        if fence_char is not None:
-            if (
-                fence_match
-                and fence_match.group(1)[0] == fence_char
-                and len(fence_match.group(1)) >= fence_len
-                and not fence_match.group(2).strip()
-            ):
-                fence_char = None
-                fence_len = 0
-            continue
-        if fence_match:
-            fence_char = fence_match.group(1)[0]
-            fence_len = len(fence_match.group(1))
+        skip_line, active_fence = _update_fence_state(line, active_fence)
+        if skip_line:
             continue
 
         h1_match = H1_RE.match(line)
@@ -225,13 +233,9 @@ def parse_minutes_markdown(
         if topic_match:
             current_topic_indent = len(topic_match.group(1))
             current_topic = _clean_topic_title(topic_match.group(2))
-        else:
-            list_match = LIST_ITEM_RE.match(line)
-            if (
-                list_match
-                and current_topic_indent is not None
-                and len(list_match.group(1)) <= current_topic_indent
-            ):
+        elif current_topic_indent is not None and line.strip():
+            current_indent = len(line) - len(line.lstrip())
+            if current_indent <= current_topic_indent:
                 current_topic = None
                 current_topic_indent = None
 
@@ -781,6 +785,18 @@ def resolve_github_event_config(
     return [], False, None
 
 
+def resolve_default_token(
+    env: Mapping[str, str] | None = None,
+) -> str | None:
+    """Resolves GitHub token, falling back to GITHUB_TOKEN when empty."""
+    source = env if env is not None else os.environ
+    for var in ("ORG_TRIAGE_TOKEN", "GITHUB_TOKEN"):
+        value = (source.get(var) or "").strip()
+        if value:
+            return value
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Post or preview circle-back comments from UCP meeting minutes."
@@ -817,7 +833,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--token",
-        default=os.getenv("ORG_TRIAGE_TOKEN") or os.getenv("GITHUB_TOKEN"),
+        default=resolve_default_token(),
         help="GitHub token (defaults to ORG_TRIAGE_TOKEN or GITHUB_TOKEN env var).",
     )
     parser.add_argument(
