@@ -76,11 +76,23 @@ TEMPLATE_PLACEHOLDER_RE = re.compile(
 DUMMY_LINK_RE = re.compile(r"\[[^\]]+\]\(#\)")
 
 GH_ITEM_LINK_RE = re.compile(
-    r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/"
+    r"https://github\.com/[A-Za-z0-9_.-]+/([A-Za-z0-9_.-]+)/"
     r"(?:pull|issues|discussions)/(\d+)(?![0-9])"
 )
+URL_RE = re.compile(r"https?://[^\s)>]+")
+_REPO_QUALIFIER_PAT = (
+    r"(?:Universal-Commerce-Protocol/[A-Za-z0-9_.-]+"
+    r"|\.github|ucp|js-sdk|python-sdk|ucp-schema|conformance|samples"
+    r"|meeting-minutes|[a-z0-9]+-sdk|ucp-[a-z0-9-]+)"
+)
 PROSE_ITEM_MENTION_RE = re.compile(
-    r"\b(?:PRs?|pull requests?|issues?|RFCs?)\s+#?(\d+)\b",
+    rf"(?:(?<![A-Za-z0-9_./`-])(?P<bt>`+)(?P<bt_repo>{_REPO_QUALIFIER_PAT})(?P=bt)\s+"
+    rf"|(?<![A-Za-z0-9_./`-])(?P<plain_repo>{_REPO_QUALIFIER_PAT})\s+)?"
+    r"(?P<kw>\b(?:PRs?|pull requests?|issues?|RFCs?)\s+#?(?P<num>\d+)\b)",
+    re.IGNORECASE,
+)
+REPO_SHORTHAND_MENTION_RE = re.compile(
+    rf"(?<![A-Za-z0-9_./`-])(?P<sh_repo>{_REPO_QUALIFIER_PAT})#(?P<sh_num>\d+)\b",
     re.IGNORECASE,
 )
 
@@ -331,6 +343,20 @@ def validate_path_and_extract_date(
     ]
 
 
+def _overlaps_span(
+    span: tuple[int, int],
+    excluded_spans: list[tuple[int, int]],
+) -> bool:
+    """Return True if span overlaps any interval in excluded_spans."""
+    start, end = span
+    return any(ex_start < end and start < ex_end for ex_start, ex_end in excluded_spans)
+
+
+def _normalize_repo(raw_repo: str) -> str:
+    """Normalize an optional org/repo or repo qualifier to lowercase repo name."""
+    return raw_repo.rsplit("/", 1)[-1].lower()
+
+
 @dataclass
 class _TopicBlock:
     """Track an active `- **Topic:**` block during validation."""
@@ -339,20 +365,35 @@ class _TopicBlock:
     line: int
     indent: int
     has_details: bool = False
-    linked_numbers: set[str] = field(default_factory=set)
-    prose_mentions: list[tuple[str, int]] = field(default_factory=list)
+    linked_items: set[tuple[str, str]] = field(default_factory=set)
+    prose_mentions: list[tuple[str | None, str, int]] = field(default_factory=list)
 
-    def record_line(
-        self,
-        raw_line: str,
-        line_no_code: str,
-        line_no: int,
-    ) -> None:
+    def record_line(self, raw_line: str, line_no: int) -> None:
         """Record GitHub links and prose PR/Issue mentions from a line."""
         for link_m in GH_ITEM_LINK_RE.finditer(raw_line):
-            self.linked_numbers.add(link_m.group(1))
-        for prose_m in PROSE_ITEM_MENTION_RE.finditer(line_no_code):
-            self.prose_mentions.append((prose_m.group(1), line_no))
+            self.linked_items.add((link_m.group(1).lower(), link_m.group(2)))
+
+        excluded_spans = [
+            *(m.span() for m in INLINE_CODE_RE.finditer(raw_line)),
+            *(m.span() for m in URL_RE.finditer(raw_line)),
+        ]
+        line_mentions: list[tuple[int, str | None, str]] = []
+        for prose_m in PROSE_ITEM_MENTION_RE.finditer(raw_line):
+            if _overlaps_span(prose_m.span("kw"), excluded_spans):
+                continue
+            raw_repo = prose_m.group("bt_repo") or prose_m.group("plain_repo")
+            repo = _normalize_repo(raw_repo) if raw_repo else None
+            line_mentions.append((prose_m.start(), repo, prose_m.group("num")))
+
+        for sh_m in REPO_SHORTHAND_MENTION_RE.finditer(raw_line):
+            if _overlaps_span(sh_m.span(), excluded_spans):
+                continue
+            repo = _normalize_repo(sh_m.group("sh_repo"))
+            line_mentions.append((sh_m.start(), repo, sh_m.group("sh_num")))
+
+        line_mentions.sort(key=lambda item: item[0])
+        for _, repo, num_str in line_mentions:
+            self.prose_mentions.append((repo, num_str, line_no))
 
 
 def _flush_topic_warnings(
@@ -377,23 +418,39 @@ def _flush_topic_warnings(
             )
         )
 
-    seen_unlinked: set[str] = set()
-    for num_str, line_no in topic.prose_mentions:
-        if num_str not in topic.linked_numbers and num_str not in seen_unlinked:
-            seen_unlinked.add(num_str)
-            findings.append(
-                Finding(
-                    rel_path=rel_path,
-                    line=line_no,
-                    severity="warning",
-                    rule="unlinked-pr-or-issue",
-                    message=(
-                        f"Topic '{topic.title}' mentions #{num_str} without a "
-                        "full GitHub link; add a link so Circle-Back "
-                        "automation can reference it."
-                    ),
-                )
+    linked_numbers = {num for _, num in topic.linked_items}
+    seen_unlinked: set[tuple[str | None, str]] = set()
+    warned_numbers: set[str] = set()
+    for repo, num_str, line_no in topic.prose_mentions:
+        if repo is not None:
+            if (repo, num_str) in topic.linked_items or (
+                repo,
+                num_str,
+            ) in seen_unlinked:
+                continue
+            seen_unlinked.add((repo, num_str))
+            warned_numbers.add(num_str)
+            ref_label = f"{repo}#{num_str}"
+        else:
+            if num_str in linked_numbers or num_str in warned_numbers:
+                continue
+            seen_unlinked.add((None, num_str))
+            warned_numbers.add(num_str)
+            ref_label = f"#{num_str}"
+
+        findings.append(
+            Finding(
+                rel_path=rel_path,
+                line=line_no,
+                severity="warning",
+                rule="unlinked-pr-or-issue",
+                message=(
+                    f"Topic '{topic.title}' mentions {ref_label} without a "
+                    "full GitHub link; add a link so Circle-Back "
+                    "automation can reference it."
+                ),
             )
+        )
 
 
 def _update_fence_state(
@@ -542,7 +599,6 @@ def _check_document_skeleton(
 
 def _process_topic_line(
     line: str,
-    line_no_code: str,
     idx: int,
     norm: str,
     active_topic: _TopicBlock | None,
@@ -568,7 +624,7 @@ def _process_topic_line(
         indent = len(topic_match.group(1))
         title = topic_match.group(2).strip()
         new_topic = _TopicBlock(title=title, line=idx, indent=indent)
-        new_topic.record_line(line, line_no_code, idx)
+        new_topic.record_line(line, idx)
         return new_topic
 
     if MALFORMED_TOPIC_RE.match(line):
@@ -594,7 +650,7 @@ def _process_topic_line(
             _flush_topic_warnings(active_topic, norm, findings)
             return None
         active_topic.has_details = True
-        active_topic.record_line(line, line_no_code, idx)
+        active_topic.record_line(line, idx)
 
     return active_topic
 
@@ -644,7 +700,6 @@ def validate_minutes_markdown(content: str, rel_path: str) -> list[Finding]:
 
         active_topic = _process_topic_line(
             line=line,
-            line_no_code=line_no_code,
             idx=idx,
             norm=norm,
             active_topic=active_topic,

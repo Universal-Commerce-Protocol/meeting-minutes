@@ -246,6 +246,70 @@ class ValidateMinutesTest(unittest.TestCase):
         self.assertIn("#919", by_rule["unlinked-pr-or-issue"].message)
         self.assertNotIn("#659", by_rule["unlinked-pr-or-issue"].message)
 
+    def test_keys_linked_items_by_repo_and_number(self) -> None:
+        """Verify cross-repo PR/Issue number collisions still warn."""
+        # 1. Links js-sdk/pull/87, mentions unlinked "ucp PR #87" -> warns ucp#87
+        cross_repo_warn_md = (
+            "# UCP Shopping Tech Council (STC) Meeting - 2026-10-09\n\n"
+            "**Led by:** Amit Handa\n\n"
+            "## Attendance\n\n"
+            "- **Present:** Amit Handa\n\n"
+            "## 1. General Topics\n\n"
+            "- **Topic:** In-Flight Shopping and SDK PRs\n"
+            "  - **Notes:** Discussed ucp PR #87 and `ucp-schema` issue #87.\n"
+            "  - **Context:** [SDK codegen]"
+            "(https://github.com/Universal-Commerce-Protocol/js-sdk/pull/87)\n"
+        )
+        findings = validate_minutes.validate_minutes_markdown(
+            cross_repo_warn_md,
+            rel_path="tc/shopping/2026/2026-10-09.md",
+        )
+        self.assertEqual(len(findings), 2)
+        self.assertTrue(all(f.rule == "unlinked-pr-or-issue" for f in findings))
+        self.assertIn("ucp#87", findings[0].message)
+        self.assertIn("ucp-schema#87", findings[1].message)
+
+        # 2. Both ucp/pull/87 and js-sdk/pull/87 linked -> zero findings
+        both_linked_md = (
+            "# UCP Shopping Tech Council (STC) Meeting - 2026-10-09\n\n"
+            "**Led by:** Amit Handa\n\n"
+            "## Attendance\n\n"
+            "- **Present:** Amit Handa\n\n"
+            "## 1. General Topics\n\n"
+            "- **Topic:** In-Flight Shopping and SDK PRs\n"
+            "  - **Notes:** Discussed ucp PR #87 and js-sdk#87.\n"
+            "  - **Context:** [Core]"
+            "(https://github.com/Universal-Commerce-Protocol/ucp/pull/87), "
+            "[SDK](https://github.com/Universal-Commerce-Protocol/js-sdk/pull/87)\n"
+        )
+        self.assertEqual(
+            validate_minutes.validate_minutes_markdown(
+                both_linked_md,
+                rel_path="tc/shopping/2026/2026-10-09.md",
+            ),
+            [],
+        )
+
+        # 3. Unqualified prose mention satisfied by non-ucp link -> zero findings
+        single_repo_md = (
+            "# UCP Shopping Tech Council (STC) Meeting - 2026-10-09\n\n"
+            "**Led by:** Amit Handa\n\n"
+            "## Attendance\n\n"
+            "- **Present:** Amit Handa\n\n"
+            "## 1. General Topics\n\n"
+            "- **Topic:** JS SDK Model Generation\n"
+            "  - **Notes:** Merged pull request 87 (`ucp PR #87` in code).\n"
+            "  - **Context:** [SDK codegen]"
+            "(https://github.com/Universal-Commerce-Protocol/js-sdk/pull/87)\n"
+        )
+        self.assertEqual(
+            validate_minutes.validate_minutes_markdown(
+                single_repo_md,
+                rel_path="tc/shopping/2026/2026-10-09.md",
+            ),
+            [],
+        )
+
     def test_github_annotation_escapes_special_characters(self) -> None:
         """Verify workflow command escaping for properties and message data."""
         finding = validate_minutes.Finding(
