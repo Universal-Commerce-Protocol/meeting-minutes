@@ -10,6 +10,26 @@
 
 Define how UCP extends to support bulk discovery feeds, enabling efficient offline product discovery across businesses using the existing UCP product/variant schema and global identifiers (GIDs). See [RFC #550](https://github.com/Universal-Commerce-Protocol/ucp/issues/550) for background and the [charter](https://github.com/Universal-Commerce-Protocol/ucp/issues/682) for the authoritative in-scope and out-of-scope lists.
 
+## Participants
+
+Roster [submitted by the chairs](https://github.com/Universal-Commerce-Protocol/ucp/issues/682#issuecomment-5376312142) on 2026-08-21 and [approved by the Governing Council](https://github.com/Universal-Commerce-Protocol/ucp/issues/682#issuecomment-5404170347) on 2026-08-25.
+
+| Name                  | Company     |
+| :-------------------- | :---------- |
+| Ilya Grigorik         | Shopify     |
+| Jason Mathnov         | PayPal      |
+| Jochem Timmers        | Channable   |
+| Kelvin Peng           | Shoplazza   |
+| Kushal Khatri         | Feedonomics |
+| Reid Kairalla         | Stripe      |
+| Sagar Rastogi         | Wayfair     |
+| Sarath Surendranath   | Stripe      |
+| Tejas Mehta           | Shopify     |
+| Tom Arbesser-Rastburg | BigCommerce |
+| Xu Chao               | Shoplazza   |
+| Yunfat Hon            | Shopline    |
+| Zhaocheng Li          | Shopline    |
+
 ## Key Deliverables
 
 | Deliverable                                       | Status      |
